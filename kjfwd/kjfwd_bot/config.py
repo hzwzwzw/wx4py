@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Mapping, Optional, Tuple
+
+
+def load_dotenv(path: Path) -> None:
+    """读取简单的 KEY=VALUE 文件，不覆盖已有环境变量。"""
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def _env_value(primary: str, fallback: Optional[str] = None) -> str:
+    value = os.getenv(primary, "").strip()
+    if not value and fallback:
+        value = os.getenv(fallback, "").strip()
+    return value
+
+
+@dataclass(frozen=True)
+class GroupConfig:
+    name: str
+    bot_nickname: str
+
+
+@dataclass(frozen=True)
+class LLMConfig:
+    base_url: str
+    model: str
+    api_key: str
+    temperature: float = 0.3
+    max_tokens: int = 700
+    timeout_seconds: float = 60.0
+    retries: int = 2
+
+
+@dataclass(frozen=True)
+class HistoryConfig:
+    database_path: Path
+    idle_timeout_seconds: int = 1800
+    max_messages: int = 100
+    max_characters: int = 16000
+    retention_days: int = 30
+    trigger_dedupe_seconds: int = 5
+
+
+@dataclass(frozen=True)
+class BotConfig:
+    groups: Tuple[GroupConfig, ...]
+    llm: LLMConfig
+    history: HistoryConfig
+    system_prompt_path: Path
+    skills_path: Path
+    queue_size_per_group: int = 5
+
+    @property
+    def group_names(self) -> Tuple[str, ...]:
+        return tuple(group.name for group in self.groups)
+
+    @property
+    def group_nicknames(self) -> Dict[str, str]:
+        return {group.name: group.bot_nickname for group in self.groups}
+
+
+def load_config(
+    config_path: Path,
+    *,
+    env_path: Optional[Path] = None,
+    environ: Optional[Mapping[str, str]] = None,
+) -> BotConfig:
+    config_path = config_path.resolve()
+    if env_path:
+        load_dotenv(env_path.resolve())
+    if environ:
+        for key, value in environ.items():
+            os.environ[str(key)] = str(value)
+
+    data = json.loads(config_path.read_text(encoding="utf-8-sig"))
+    base_dir = config_path.parent
+
+    groups = tuple(
+        GroupConfig(
+            name=str(item.get("name", "")).strip(),
+            bot_nickname=str(item.get("bot_nickname", "")).strip(),
+        )
+        for item in data.get("groups", [])
+    )
+    if not groups or any(not group.name or not group.bot_nickname for group in groups):
+        raise ValueError("groups 必须包含非空的 name 和 bot_nickname")
+    if len({group.name for group in groups}) != len(groups):
+        raise ValueError("groups 中不能有重复群名")
+
+    llm_data = data.get("llm", {})
+    api_key = _env_value(str(llm_data.get("api_key_env", "API_KEY")))
+    base_url = str(llm_data.get("base_url", "")).strip() or _env_value(
+        str(llm_data.get("base_url_env", "BASE_URL"))
+    )
+    model = str(llm_data.get("model", "")).strip() or _env_value(
+        str(llm_data.get("model_env", "MODEL"))
+    )
+    if not api_key:
+        raise ValueError("未找到 LLM API Key 环境变量")
+    if not base_url or not model:
+        raise ValueError("LLM base_url 和 model 不能为空")
+
+    history_data = data.get("history", {})
+    history = HistoryConfig(
+        database_path=_resolve_path(base_dir, history_data.get("database_path", "data/kjfwd.db")),
+        idle_timeout_seconds=int(history_data.get("idle_timeout_seconds", 1800)),
+        max_messages=int(history_data.get("max_messages", 100)),
+        max_characters=int(history_data.get("max_characters", 16000)),
+        retention_days=int(history_data.get("retention_days", 30)),
+        trigger_dedupe_seconds=int(history_data.get("trigger_dedupe_seconds", 5)),
+    )
+    if min(history.idle_timeout_seconds, history.max_messages, history.max_characters) <= 0:
+        raise ValueError("history 的时间、消息数和字符数限制必须大于 0")
+
+    return BotConfig(
+        groups=groups,
+        llm=LLMConfig(
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            temperature=float(llm_data.get("temperature", 0.3)),
+            max_tokens=int(llm_data.get("max_tokens", 700)),
+            timeout_seconds=float(llm_data.get("timeout_seconds", 60)),
+            retries=int(llm_data.get("retries", 2)),
+        ),
+        history=history,
+        system_prompt_path=_resolve_path(base_dir, data.get("system_prompt_path", "prompts/system.md")),
+        skills_path=_resolve_path(base_dir, data.get("skills_path", "skills")),
+        queue_size_per_group=int(data.get("queue_size_per_group", 5)),
+    )
+
+
+def _resolve_path(base_dir: Path, value: object) -> Path:
+    path = Path(str(value))
+    return path if path.is_absolute() else (base_dir / path).resolve()

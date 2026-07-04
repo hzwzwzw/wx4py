@@ -1,0 +1,57 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from kjfwd.kjfwd_bot.history import HistoryStore
+
+
+class HistoryStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.store = HistoryStore(Path(self.tempdir.name) / "history.db", idle_timeout_seconds=1800)
+
+    def tearDown(self):
+        self.store.close()
+        self.tempdir.cleanup()
+
+    def test_session_continues_inside_30_minutes_and_splits_after_gap(self):
+        first, _ = self.store.record_group_message("群", "一", 1000, "a")
+        second, _ = self.store.record_group_message("群", "二", 2799, "b")
+        third, _ = self.store.record_group_message("群", "三", 4600, "c")
+        self.assertEqual(first.session_id, second.session_id)
+        self.assertNotEqual(second.session_id, third.session_id)
+
+    def test_source_key_and_trigger_claim_are_idempotent(self):
+        message, inserted = self.store.record_group_message("群", "@bot hello", 1000, "uia:1.2")
+        duplicate, inserted_again = self.store.record_group_message("群", "@bot hello", 1001, "uia:1.2")
+        self.assertTrue(inserted)
+        self.assertFalse(inserted_again)
+        self.assertEqual(message.id, duplicate.id)
+
+        claim = self.store.claim_trigger("trigger", "fingerprint", "群", message.id, 1000, 5)
+        duplicate_claim = self.store.claim_trigger("trigger", "fingerprint", "群", message.id, 1001, 5)
+        self.assertTrue(claim.accepted)
+        self.assertFalse(duplicate_claim.accepted)
+        self.assertFalse(duplicate_claim.sent)
+
+        reply = self.store.record_assistant_message("群", message.session_id, "answer", 1002)
+        self.store.mark_trigger_sent(claim.trigger_id, reply.id)
+        row = self.store.get_trigger(claim.trigger_id)
+        self.assertEqual(1, row["sent"])
+        self.assertEqual("sent", row["status"])
+
+    def test_snapshot_is_frozen_and_cropped_from_oldest(self):
+        messages = []
+        for index in range(5):
+            message, _ = self.store.record_group_message(
+                "群", f"message-{index}", 1000 + index, f"key-{index}"
+            )
+            messages.append(message)
+        snapshot = self.store.snapshot(messages[-1], max_messages=3, max_characters=100)
+        self.assertEqual(["message-2", "message-3", "message-4"], [m.content for m in snapshot.messages])
+        self.store.record_group_message("群", "future", 1006, "future")
+        self.assertNotIn("future", [m.content for m in snapshot.messages])
+
+
+if __name__ == "__main__":
+    unittest.main()

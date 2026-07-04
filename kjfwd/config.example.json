@@ -1,0 +1,32 @@
+{
+  "groups": [
+    {
+      "name": "客户群一",
+      "bot_nickname": "柯基服务队"
+    },
+    {
+      "name": "客户群二",
+      "bot_nickname": "柯基服务队"
+    }
+  ],
+  "llm": {
+    "api_key_env": "API_KEY",
+    "base_url_env": "BASE_URL",
+    "model_env": "MODEL",
+    "temperature": 0.3,
+    "max_tokens": 700,
+    "timeout_seconds": 60,
+    "retries": 2
+  },
+  "history": {
+    "database_path": "data/kjfwd.db",
+    "idle_timeout_seconds": 1800,
+    "max_messages": 100,
+    "max_characters": 16000,
+    "retention_days": 30,
+    "trigger_dedupe_seconds": 5
+  },
+  "system_prompt_path": "prompts/system.md",
+  "skills_path": "skills",
+  "queue_size_per_group": 5
+}
