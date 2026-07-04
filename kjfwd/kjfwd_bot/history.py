@@ -126,7 +126,7 @@ class HistoryStore:
         group_name: str,
         message_id: int,
         requested_at: float,
-        dedupe_seconds: int,
+        dedupe_seconds: float,
     ) -> TriggerClaim:
         with self._lock:
             existing = self._conn.execute(

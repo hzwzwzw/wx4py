@@ -24,7 +24,7 @@
     "max_messages": 100,
     "max_characters": 16000,
     "retention_days": 30,
-    "trigger_dedupe_seconds": 5
+    "trigger_dedupe_seconds": 1.0
   },
   "system_prompt_path": "prompts/system.md",
   "skills_path": "skills",

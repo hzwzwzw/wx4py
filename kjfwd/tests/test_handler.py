@@ -85,6 +85,32 @@ class HandlerTests(unittest.TestCase):
         row = self.store.get_trigger(1)
         self.assertEqual(1, row["sent"])
 
+    def test_reused_runtime_id_with_new_content_is_not_treated_as_duplicate(self):
+        now = time.time()
+        first = MessageEvent(
+            group="客户群",
+            content="@柯基服务队\u2005 第一个问题",
+            timestamp=now,
+            group_nickname="柯基服务队",
+            is_at_me=True,
+            raw=FakeRaw((1, 2, 3)),
+        )
+        second = MessageEvent(
+            group="客户群",
+            content="@柯基服务队\u2005 这是新的问题",
+            timestamp=now + 0.1,
+            group_nickname="柯基服务队",
+            is_at_me=True,
+            raw=FakeRaw((1, 2, 3)),
+        )
+        self.handler.handle(first)
+        self.handler.handle(second)
+        deadline = time.time() + 2
+        while len(self.actions) < 2 and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(2, len(self.model.calls))
+        self.assertEqual(2, len(self.actions))
+
     def test_reference_notice_is_not_duplicated(self):
         text = "操作建议。\n（内容仅供参考）"
         self.assertEqual(text, append_reference_notice(text))

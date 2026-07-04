@@ -55,7 +55,7 @@ class HistoryConfig:
     max_messages: int = 100
     max_characters: int = 16000
     retention_days: int = 30
-    trigger_dedupe_seconds: int = 5
+    trigger_dedupe_seconds: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -124,7 +124,7 @@ def load_config(
         max_messages=int(history_data.get("max_messages", 100)),
         max_characters=int(history_data.get("max_characters", 16000)),
         retention_days=int(history_data.get("retention_days", 30)),
-        trigger_dedupe_seconds=int(history_data.get("trigger_dedupe_seconds", 5)),
+        trigger_dedupe_seconds=float(history_data.get("trigger_dedupe_seconds", 1.0)),
     )
     if min(history.idle_timeout_seconds, history.max_messages, history.max_characters) <= 0:
         raise ValueError("history 的时间、消息数和字符数限制必须大于 0")

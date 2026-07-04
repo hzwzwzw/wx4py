@@ -30,17 +30,18 @@ def event_source_key(event: MessageEvent) -> Optional[str]:
         return None
     if not runtime_id:
         return None
-    return "uia:" + ".".join(str(part) for part in runtime_id)
+    # RuntimeId 属于虚拟化 UI 控件，滚动或刷新后可能被新消息复用，不能永久当作消息 ID。
+    normalized = " ".join(str(event.content or "").split())
+    raw_key = f"{event.group}|{runtime_id}|{normalized}|{float(event.timestamp):.6f}"
+    return "event:" + hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
 
-def trigger_key(event: MessageEvent, source_key: Optional[str], dedupe_seconds: int) -> str:
+def trigger_key(event: MessageEvent, source_key: Optional[str]) -> str:
     if source_key:
         raw = f"{event.group}|{source_key}"
     else:
-        # event.raw 缺失时的保守降级；极短时间内完全相同的 @ 视为重复投递。
-        slot = int(float(event.timestamp) / max(1, dedupe_seconds))
         normalized = " ".join(str(event.content or "").split())
-        raw = f"{event.group}|{slot}|{normalized}"
+        raw = f"{event.group}|{float(event.timestamp):.6f}|{normalized}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -69,7 +70,7 @@ class KJFWDHandler(MessageHandler):
         prompt_builder: PromptBuilder,
         max_messages: int = 100,
         max_characters: int = 16000,
-        trigger_dedupe_seconds: int = 5,
+        trigger_dedupe_seconds: float = 1.0,
         queue_size_per_group: int = 5,
     ):
         self.groups = groups
@@ -105,7 +106,7 @@ class KJFWDHandler(MessageHandler):
         if not event.is_at_me:
             return None
 
-        key = trigger_key(event, source_key, self.trigger_dedupe_seconds)
+        key = trigger_key(event, source_key)
         claim = self.history.claim_trigger(
             key,
             trigger_fingerprint(event),
