@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import queue
+import re
 import threading
 from typing import Callable, Dict, Optional, Tuple
 
@@ -18,6 +19,7 @@ from .prompt import PromptBuilder, explicit_skill_names, strip_at
 
 logger = logging.getLogger(__name__)
 REFERENCE_NOTICE = "（内容仅供参考）"
+CLEAR_COMMAND_RE = re.compile(r"^/clear(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 
 
 def event_source_key(event: MessageEvent) -> Optional[str]:
@@ -85,6 +87,8 @@ class KJFWDHandler(MessageHandler):
         self._threads: Dict[str, threading.Thread] = {}
         self._emit_action: Optional[Callable] = None
         self._stop_event = threading.Event()
+        self._context_lock = threading.RLock()
+        self._context_generations = {name: 0 for name in groups}
 
     def set_action_emitter(self, emit_action) -> None:
         self._emit_action = emit_action
@@ -124,20 +128,77 @@ class KJFWDHandler(MessageHandler):
         if not request:
             self.history.mark_trigger_failed(claim.trigger_id, "empty_request")
             return None
+
+        clear_match = CLEAR_COMMAND_RE.fullmatch(request)
+        if clear_match:
+            return self._handle_clear(event.group, message, claim.trigger_id, clear_match.group(1))
+
+        with self._context_lock:
+            generation = self._context_generations[event.group]
         snapshot = self.history.snapshot(
             message, max_messages=self.max_messages, max_characters=self.max_characters
         )
-        job = ReplyJob(claim.trigger_id, snapshot, request, explicit_skill_names(request))
-        target_queue = self._queues.get(event.group)
+        job = ReplyJob(
+            claim.trigger_id,
+            snapshot,
+            request,
+            explicit_skill_names(request),
+            generation,
+        )
+        self._enqueue_job(event.group, job)
+        return None
+
+    def _handle_clear(
+        self,
+        group_name: str,
+        message,
+        trigger_id: int,
+        following_request: Optional[str],
+    ):
+        with self._context_lock:
+            self._context_generations[group_name] += 1
+            generation = self._context_generations[group_name]
+            message = self.history.start_new_session(message.id)
+
+            request = str(following_request or "").strip()
+            if not request:
+                try:
+                    reply = append_reference_notice("已清除此前的聊天上下文，我们开始一次新对话。")
+                    stored = self.history.record_assistant_message(
+                        group_name, message.session_id, reply
+                    )
+                    if self._emit_action is None:
+                        raise RuntimeError("消息发送器尚未初始化")
+                    self._emit_action(ReplyAction(group=group_name, content=reply))
+                    self.history.mark_trigger_sent(trigger_id, stored.id)
+                except Exception as exc:
+                    self.history.mark_trigger_failed(trigger_id, str(exc))
+                    logger.exception("发送 /clear 确认失败：group=%s", group_name)
+                return None
+
+            snapshot = self.history.snapshot(
+                message, max_messages=self.max_messages, max_characters=self.max_characters
+            )
+            job = ReplyJob(
+                trigger_id,
+                snapshot,
+                request,
+                explicit_skill_names(request),
+                generation,
+            )
+        self._enqueue_job(group_name, job)
+        return None
+
+    def _enqueue_job(self, group_name: str, job: ReplyJob) -> None:
+        target_queue = self._queues.get(group_name)
         if target_queue is None:
-            self.history.mark_trigger_failed(claim.trigger_id, "unknown_group")
-            return None
+            self.history.mark_trigger_failed(job.trigger_id, "unknown_group")
+            return
         try:
             target_queue.put_nowait(job)
         except queue.Full:
-            self.history.mark_trigger_failed(claim.trigger_id, "queue_full")
-            logger.warning("群回复队列已满，丢弃触发消息：%s", event.group)
-        return None
+            self.history.mark_trigger_failed(job.trigger_id, "queue_full")
+            logger.warning("群回复队列已满，丢弃触发消息：%s", group_name)
 
     def _worker(self, group_name: str) -> None:
         jobs = self._queues[group_name]
@@ -147,6 +208,10 @@ class KJFWDHandler(MessageHandler):
                 jobs.task_done()
                 break
             try:
+                with self._context_lock:
+                    if job.context_generation != self._context_generations[group_name]:
+                        self.history.mark_trigger_failed(job.trigger_id, "cleared")
+                        continue
                 system_prompt, user_prompt = self.prompt_builder.build(
                     job.snapshot, job.clean_request, job.explicit_skills
                 )
@@ -154,14 +219,18 @@ class KJFWDHandler(MessageHandler):
                 if not reply:
                     raise RuntimeError("模型返回空回复")
                 reply = append_reference_notice(reply)
-                stored = self.history.record_assistant_message(
-                    group_name, job.snapshot.session_id, reply
-                )
-                if self._emit_action is None:
-                    raise RuntimeError("消息发送器尚未初始化")
-                self._emit_action(ReplyAction(group=group_name, content=reply))
-                # sent 表示已经交给 wx4py 的串行发送队列，不代表微信提供了送达回执。
-                self.history.mark_trigger_sent(job.trigger_id, stored.id)
+                with self._context_lock:
+                    if job.context_generation != self._context_generations[group_name]:
+                        self.history.mark_trigger_failed(job.trigger_id, "cleared")
+                        continue
+                    stored = self.history.record_assistant_message(
+                        group_name, job.snapshot.session_id, reply
+                    )
+                    if self._emit_action is None:
+                        raise RuntimeError("消息发送器尚未初始化")
+                    self._emit_action(ReplyAction(group=group_name, content=reply))
+                    # sent 表示已经交给 wx4py 的串行发送队列，不代表微信提供了送达回执。
+                    self.history.mark_trigger_sent(job.trigger_id, stored.id)
             except Exception as exc:
                 self.history.mark_trigger_failed(job.trigger_id, str(exc))
                 logger.exception("生成群回复失败：group=%s trigger_id=%s", group_name, job.trigger_id)

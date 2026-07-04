@@ -119,6 +119,20 @@ class HistoryStore:
             row = self._conn.execute("SELECT * FROM messages WHERE id=?", (cursor.lastrowid,)).fetchone()
             return self._row_to_message(row)
 
+    def start_new_session(self, message_id: int) -> StoredMessage:
+        """把指定消息设为新会话的第一条消息。"""
+        session_id = uuid.uuid4().hex
+        with self._lock:
+            self._conn.execute(
+                "UPDATE messages SET session_id=? WHERE id=?",
+                (session_id, message_id),
+            )
+            self._conn.commit()
+            row = self._conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+            if row is None:
+                raise KeyError(message_id)
+            return self._row_to_message(row)
+
     def claim_trigger(
         self,
         trigger_key: str,

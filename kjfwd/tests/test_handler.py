@@ -29,6 +29,17 @@ class FakeModel:
         return "请先断电，再检查电源线。"
 
 
+class BlockingModel:
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def complete(self, system_prompt, user_prompt):
+        self.started.set()
+        self.release.wait(2)
+        return "这是一条已经过期的回复。"
+
+
 class HandlerTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -127,6 +138,79 @@ class HandlerTests(unittest.TestCase):
         self.handler.handle(event)
         time.sleep(0.05)
         self.assertEqual([], self.model.calls)
+
+    def test_clear_starts_new_context_without_calling_model(self):
+        now = time.time()
+        self.handler.handle(
+            MessageEvent("客户群", "旧对话内容", now, "柯基服务队", False, FakeRaw((7, 1)))
+        )
+        self.handler.handle(
+            MessageEvent(
+                "客户群", "@柯基服务队\u2005 /clear", now + 1, "柯基服务队", True, FakeRaw((7, 2))
+            )
+        )
+        self.assertTrue(self.action_ready.wait(1))
+        self.assertEqual([], self.model.calls)
+        self.assertIn("已清除此前的聊天上下文", self.actions[0].content)
+
+        self.handler.handle(
+            MessageEvent(
+                "客户群", "@柯基服务队\u2005 新问题", now + 2, "柯基服务队", True, FakeRaw((7, 3))
+            )
+        )
+        deadline = time.time() + 2
+        while not self.model.calls and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(1, len(self.model.calls))
+        user_prompt = self.model.calls[0][1]
+        self.assertNotIn("旧对话内容", user_prompt)
+        self.assertIn("新问题", user_prompt)
+
+    def test_clear_with_following_text_uses_it_as_first_new_request(self):
+        now = time.time()
+        self.handler.handle(
+            MessageEvent("客户群", "旧信息", now, "柯基服务队", False, FakeRaw((8, 1)))
+        )
+        self.handler.handle(
+            MessageEvent(
+                "客户群",
+                "@柯基服务队\u2005 /clear 如何修复系统？",
+                now + 1,
+                "柯基服务队",
+                True,
+                FakeRaw((8, 2)),
+            )
+        )
+        deadline = time.time() + 2
+        while not self.model.calls and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(1, len(self.model.calls))
+        user_prompt = self.model.calls[0][1]
+        self.assertNotIn("旧信息", user_prompt)
+        self.assertIn("<current_request>\n如何修复系统？", user_prompt)
+
+    def test_clear_discards_an_inflight_old_reply(self):
+        blocking_model = BlockingModel()
+        self.handler.model = blocking_model
+        now = time.time()
+        self.handler.handle(
+            MessageEvent(
+                "客户群", "@柯基服务队\u2005 旧问题", now, "柯基服务队", True, FakeRaw((9, 1))
+            )
+        )
+        self.assertTrue(blocking_model.started.wait(1))
+        self.handler.handle(
+            MessageEvent(
+                "客户群", "@柯基服务队\u2005 /clear", now + 1, "柯基服务队", True, FakeRaw((9, 2))
+            )
+        )
+        blocking_model.release.set()
+        deadline = time.time() + 2
+        while self.store.get_trigger(1)["status"] == "pending" and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual("cleared", self.store.get_trigger(1)["error"])
+        self.assertEqual(1, len(self.actions))
+        self.assertIn("已清除此前的聊天上下文", self.actions[0].content)
 
 
 if __name__ == "__main__":

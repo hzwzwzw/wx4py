@@ -37,3 +37,4 @@ class ReplyJob:
     snapshot: ContextSnapshot
     clean_request: str
     explicit_skills: Tuple[str, ...]
+    context_generation: int
