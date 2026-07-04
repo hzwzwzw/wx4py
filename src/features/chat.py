@@ -13,11 +13,14 @@ import win32api
 import win32con
 
 from .base import BasePage
+from ..core import uiautomation as uia
 from ..core.exceptions import ControlNotFoundError, TargetNotFoundError
 from ..config import (
     ALLOWED_GROUPS,
     BATCH_SEND_INTERVAL_MAX,
     BATCH_SEND_INTERVAL_MIN,
+    INPUT_FOCUS_TIMEOUT_SECONDS,
+    MIN_SEND_INTERVAL_SECONDS,
     OPERATION_INTERVAL,
     SEARCH_RETRY_COUNT,
     SEARCH_RETRY_DELAY_MAX,
@@ -27,6 +30,7 @@ from ..config import (
     SEND_JITTER_MAX,
     SEND_JITTER_MIN,
     SEND_RECONNECT_RETRY_COUNT,
+    SEND_RETRY_BACKOFF_MAX_SECONDS,
     SEND_RETRY_COUNT,
 )
 from ..utils.clipboard_utils import set_files_to_clipboard, set_text_to_clipboard
@@ -95,6 +99,7 @@ class ChatWindow(BasePage):
         self._last_search_results: Dict[str, List[SearchResult]] = {}
         self._run_id = str(uuid.uuid4())
         self._recent_send_records: Dict[str, float] = {}
+        self._last_send_attempt_at: Optional[float] = None
 
     # ==================== 私有方法 ====================
 
@@ -102,6 +107,20 @@ class ChatWindow(BasePage):
         """在给定范围内随机睡眠。"""
         delay = random.uniform(minimum, maximum)
         time.sleep(delay)
+        return delay
+
+    def _throttle_send_attempts(self) -> float:
+        """限制连续发送尝试的最小间隔，避免瞬时重复操作。"""
+        now = time.monotonic()
+        delay = 0.0
+        if self._last_send_attempt_at is not None:
+            delay = max(
+                0.0,
+                MIN_SEND_INTERVAL_SECONDS - (now - self._last_send_attempt_at),
+            )
+            if delay:
+                time.sleep(delay)
+        self._last_send_attempt_at = time.monotonic()
         return delay
 
     def _log_send_phase(
@@ -190,12 +209,47 @@ class ChatWindow(BasePage):
         import win32con
 
         win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(key_code, 0, 0, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+        key_is_down = False
+        try:
+            time.sleep(0.05)
+            win32api.keybd_event(key_code, 0, 0, 0)
+            key_is_down = True
+            time.sleep(0.05)
+            win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
+            key_is_down = False
+            time.sleep(0.05)
+        finally:
+            if key_is_down:
+                win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
+            win32api.keybd_event(
+                win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0
+            )
+
+    @staticmethod
+    def _control_contains_focus(edit) -> bool:
+        """判断当前焦点是否位于输入控件或其子控件中。"""
+        try:
+            focused = uia.GetFocusedControl()
+            current = focused
+            for _ in range(8):
+                if not current:
+                    return False
+                if uia.ControlsAreSame(current, edit):
+                    return True
+                current = current.GetParentControl()
+        except Exception:
+            return False
+        return False
+
+    @staticmethod
+    def _wait_for_input_focus(edit, timeout: float = INPUT_FOCUS_TIMEOUT_SECONDS) -> bool:
+        """在有限时间内确认输入焦点，防止按键落到其他窗口。"""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if ChatWindow._control_contains_focus(edit):
+                return True
+            time.sleep(0.05)
+        return False
 
     @staticmethod
     def prepare_input_for_paste(edit, *, logger_override=None):
@@ -209,12 +263,16 @@ class ChatWindow(BasePage):
             try:
                 edit.Click(simulateMove=False)
             except Exception:
-                try:
-                    edit.SetFocus()
-                except Exception:
-                    pass
+                pass
 
-            time.sleep(0.2)
+            try:
+                edit.SetFocus()
+            except Exception:
+                pass
+
+            if not ChatWindow._wait_for_input_focus(edit):
+                active_logger.error("输入框未获得键盘焦点，已取消输入")
+                return None
 
             try:
                 edit.SendKeys('{Ctrl}a')
@@ -233,11 +291,15 @@ class ChatWindow(BasePage):
     def paste_text_into_focused_input(
         text: str,
         *,
+        edit=None,
         log_error: str = "写入消息到剪贴板失败",
         logger_override=None,
     ) -> bool:
         """通过剪贴板将文本粘贴到当前已聚焦的输入框。"""
         active_logger = logger_override or logger
+        if edit is not None and not ChatWindow._wait_for_input_focus(edit):
+            active_logger.error("粘贴前输入框已失去焦点，已取消输入")
+            return False
         if not set_text_to_clipboard(text):
             active_logger.error(log_error)
             return False
@@ -262,12 +324,16 @@ class ChatWindow(BasePage):
 
         if not ChatWindow.paste_text_into_focused_input(
             text,
+            edit=edit,
             log_error=clipboard_error,
             logger_override=logger_override,
         ):
             return False
 
         active_logger = logger_override or logger
+        if not ChatWindow._wait_for_input_focus(edit):
+            active_logger.error("发送前输入框已失去焦点，已取消发送")
+            return False
         try:
             edit.SendKeys('{Enter}')
         except Exception as exc:
@@ -294,30 +360,52 @@ class ChatWindow(BasePage):
         """每次发送尝试前简短睡眠。"""
         self._sleep_with_jitter(SEND_JITTER_MIN, SEND_JITTER_MAX)
 
-    def _sleep_before_send_retry(self) -> None:
-        """重试失败后简短睡眠。"""
-        self._sleep_with_jitter(SEARCH_RETRY_DELAY_MIN, SEARCH_RETRY_DELAY_MAX)
+    def _sleep_before_send_retry(self, attempt: int) -> float:
+        """重试失败后递增退避，减少连续重复操作。"""
+        factor = 2 ** max(attempt - 1, 0)
+        minimum = min(
+            SEARCH_RETRY_DELAY_MIN * factor,
+            SEND_RETRY_BACKOFF_MAX_SECONDS,
+        )
+        maximum = min(
+            SEARCH_RETRY_DELAY_MAX * factor,
+            SEND_RETRY_BACKOFF_MAX_SECONDS,
+        )
+        return self._sleep_with_jitter(minimum, maximum)
 
     def _find_target_result(
         self, results: Dict[str, List[SearchResult]], target: str, target_type: str
     ) -> Optional[SearchResult]:
-        """在搜索结果中查找匹配的目标，优先级：最常使用 > 联系人/群聊 > 功能"""
-        # 优先级1：最常使用（最高）
-        for item in results.get(GROUP_FREQUENT, []):
-            if target in item.name:
-                return item
-
-        # 优先级2：联系人/群聊
+        """查找目标；优先精确匹配，模糊匹配仅在结果唯一时使用。"""
         primary_group = GROUP_CHATS if target_type == 'group' else GROUP_CONTACTS
-        for item in results.get(primary_group, []):
-            if target in item.name:
+        candidate_groups = [GROUP_FREQUENT, primary_group]
+        if target_type == 'contact':
+            candidate_groups.append(GROUP_FUNCTIONS)
+
+        candidates = [
+            item
+            for group in candidate_groups
+            for item in results.get(group, [])
+        ]
+        normalized_target = target.strip().casefold()
+
+        for item in candidates:
+            if item.name.strip().casefold() == normalized_target:
                 return item
 
-        # 优先级3：功能
-        if target_type == 'contact':
-            for item in results.get(GROUP_FUNCTIONS, []):
-                if target in item.name:
-                    return item
+        partial_matches = [
+            item
+            for item in candidates
+            if normalized_target in item.name.strip().casefold()
+        ]
+        if len(partial_matches) == 1:
+            return partial_matches[0]
+        if len(partial_matches) > 1:
+            logger.error(
+                "搜索目标存在多个模糊匹配，已取消选择: %s -> %s",
+                target,
+                [item.name for item in partial_matches],
+            )
 
         return None
 
@@ -402,7 +490,7 @@ class ChatWindow(BasePage):
             if self._send_once(request, attempt):
                 return True
             if index < len(attempt_list) - 1:
-                self._sleep_before_send_retry()
+                self._sleep_before_send_retry(attempt)
 
         return False
 
@@ -957,9 +1045,7 @@ class ChatWindow(BasePage):
 
             self._clear_search()
             self._window.activate()
-            delay = self._sleep_with_jitter(
-                SEARCH_RETRY_DELAY_MIN, SEARCH_RETRY_DELAY_MAX
-            )
+            delay = self._sleep_before_send_retry(attempt)
             logger.debug(
                 f"打开聊天重试已计划: '{target}' "
                 f"({attempt}/{SEARCH_RETRY_COUNT}, 等待 {delay:.2f}秒)"
@@ -980,6 +1066,7 @@ class ChatWindow(BasePage):
             bool: 成功时返回 True
         """
         logger.info(f"发送消息: {message[:20]}...")
+        self._throttle_send_attempts()
 
         chat_input = self._get_chat_input()
         if not self.send_text_via_input(chat_input, message):
@@ -1078,6 +1165,7 @@ class ChatWindow(BasePage):
             bool: 成功时返回 True
         """
         logger.info(f"发送文件: {file_path}")
+        self._throttle_send_attempts()
 
         chat_input = self._prepare_chat_input_for_paste()
         if not chat_input:
@@ -1088,6 +1176,9 @@ class ChatWindow(BasePage):
 
         time.sleep(0.2)
 
+        if not self._wait_for_input_focus(chat_input):
+            logger.error("粘贴文件前输入框已失去焦点，已取消发送")
+            return False
         self._send_ctrl_hotkey(VK_V)
         time.sleep(0.5)
 
@@ -1101,6 +1192,9 @@ class ChatWindow(BasePage):
                 return False
 
         # 按回车发送
+        if not self._wait_for_input_focus(chat_input):
+            logger.error("发送文件前输入框已失去焦点，已取消发送")
+            return False
         chat_input.SendKeys('{Enter}')
         time.sleep(0.5)
 

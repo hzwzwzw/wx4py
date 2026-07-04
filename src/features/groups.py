@@ -35,18 +35,29 @@ class GroupManager(BasePage):
     def _press_key(self, key_code: int, hold_time: float = 0.1) -> None:
         """按下并释放一个虚拟按键。"""
         win32api.keybd_event(key_code, 0, 0, 0)
-        time.sleep(hold_time)
-        win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
+        try:
+            time.sleep(hold_time)
+        finally:
+            win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
 
     def _send_ctrl_combo(self, key_code: int, settle_time: float = 0.3) -> None:
         """发送 Ctrl+<key> 组合键并短暂等待 UI 更新。"""
         win32api.keybd_event(win32con.VK_CONTROL, 0, 0, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(key_code, 0, 0, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
-        time.sleep(0.05)
-        win32api.keybd_event(win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+        key_is_down = False
+        try:
+            time.sleep(0.05)
+            win32api.keybd_event(key_code, 0, 0, 0)
+            key_is_down = True
+            time.sleep(0.05)
+            win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
+            key_is_down = False
+            time.sleep(0.05)
+        finally:
+            if key_is_down:
+                win32api.keybd_event(key_code, 0, win32con.KEYEVENTF_KEYUP, 0)
+            win32api.keybd_event(
+                win32con.VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0
+            )
         time.sleep(settle_time)
 
     def _walk_controls(self, root, max_depth: int = 20) -> list:
