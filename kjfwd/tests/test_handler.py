@@ -7,7 +7,12 @@ from pathlib import Path
 from wx4py import MessageEvent, ReplyAction
 
 from kjfwd.kjfwd_bot.capabilities import CapabilityRegistry
-from kjfwd.kjfwd_bot.handler import KJFWDHandler, append_reference_notice
+from kjfwd.kjfwd_bot.handler import (
+    KJFWDHandler,
+    append_reference_notice,
+    build_help_text,
+    is_help_request,
+)
 from kjfwd.kjfwd_bot.history import HistoryStore
 from kjfwd.kjfwd_bot.prompt import PromptBuilder
 
@@ -138,6 +143,48 @@ class HandlerTests(unittest.TestCase):
         self.handler.handle(event)
         time.sleep(0.05)
         self.assertEqual([], self.model.calls)
+
+    def test_help_command_returns_introduction_without_model_call(self):
+        event = MessageEvent(
+            group="客户群",
+            content="@柯基服务队\u2005 /help",
+            timestamp=time.time(),
+            group_nickname="柯基服务队",
+            is_at_me=True,
+            raw=FakeRaw((12, 1)),
+        )
+        self.handler.handle(event)
+        self.assertTrue(self.action_ready.wait(1))
+        self.assertEqual([], self.model.calls)
+        self.assertIn("柯基服务队群聊答疑助手", self.actions[0].content)
+        self.assertIn("/new [新问题]", self.actions[0].content)
+        self.assertIn("/search <问题>", self.actions[0].content)
+
+    def test_natural_help_question_returns_help(self):
+        event = MessageEvent(
+            group="客户群",
+            content="@柯基服务队\u2005 如何使用你？",
+            timestamp=time.time(),
+            group_nickname="柯基服务队",
+            is_at_me=True,
+            raw=FakeRaw((12, 2)),
+        )
+        self.handler.handle(event)
+        self.assertTrue(self.action_ready.wait(1))
+        self.assertEqual([], self.model.calls)
+        self.assertIn("可用指令", self.actions[0].content)
+        self.assertTrue(is_help_request("你有哪些指令？"))
+        self.assertTrue(is_help_request("怎么使用这个 agent？"))
+
+    def test_help_detection_does_not_capture_a_normal_how_to_question(self):
+        self.assertFalse(is_help_request("如何使用你推荐的系统修复命令？"))
+
+    def test_help_text_lists_loaded_skills(self):
+        text = build_help_text(
+            (("explain", "细化操作指南"), ("repair-risk", "维修服务风险判断"))
+        )
+        self.assertIn("/explain <问题>", text)
+        self.assertIn("/repair-risk <问题>：维修服务风险判断", text)
 
     def test_clear_starts_new_context_without_calling_model(self):
         now = time.time()

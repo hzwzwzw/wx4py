@@ -45,6 +45,14 @@ class PromptSkill(Capability):
     def name(self) -> str:
         return self.skill_name
 
+    @property
+    def title(self) -> str:
+        for line in self.content.splitlines():
+            value = line.strip()
+            if value.startswith("# "):
+                return value[2:].strip()
+        return self.skill_name
+
     def system_prompt(self, explicitly_requested: bool) -> str:
         mode = "用户已通过斜杠显式指定，必须优先采用" if explicitly_requested else "相关时可主动采用"
         return f"<skill name=\"{self.name}\" mode=\"{mode}\">\n{self.content.strip()}\n</skill>"
@@ -75,6 +83,13 @@ class CapabilityRegistry:
     @property
     def names(self) -> Tuple[str, ...]:
         return tuple(item.name for item in self._items)
+
+    @property
+    def command_entries(self) -> Tuple[Tuple[str, str], ...]:
+        return tuple(
+            (item.name, item.title if isinstance(item, PromptSkill) else item.name)
+            for item in self._items
+        )
 
     def render(self, explicitly_requested: Sequence[str]) -> str:
         explicit = set(explicitly_requested)

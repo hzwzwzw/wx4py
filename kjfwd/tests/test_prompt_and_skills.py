@@ -9,6 +9,13 @@ from kjfwd.kjfwd_bot.prompt import PromptBuilder, explicit_skill_names, strip_at
 
 
 class PromptAndSkillTests(unittest.TestCase):
+    def test_system_prompt_contains_current_offline_service_information(self):
+        prompt = (
+            Path(__file__).resolve().parents[1] / "prompts" / "system.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("C楼三层南侧吧台", prompt)
+        self.assertIn("台式机问题，可以指引用户申请外勤服务", prompt)
+
     def test_skill_directory_is_extensible_and_explicit_command_is_detected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -5,7 +5,7 @@ import logging
 import queue
 import re
 import threading
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 
 try:
     from wx4py import MessageEvent, MessageHandler, ReplyAction
@@ -21,6 +21,23 @@ logger = logging.getLogger(__name__)
 REFERENCE_NOTICE = "（内容仅供参考）"
 RESET_COMMAND_RE = re.compile(r"^/(?:clear|new)(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 SEARCH_COMMAND_RE = re.compile(r"^/search(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+HELP_COMMAND_RE = re.compile(r"^/help\s*$", re.IGNORECASE)
+NATURAL_HELP_PATTERNS = (
+    re.compile(
+        r"^(?:请问)?(?:如何|怎么|怎样)(?:使用|用)(?:你|这个机器人|机器人|这个\s*(?:bot|agent)|bot|agent)[？?。！!\s]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:你|这个机器人|机器人|这个\s*(?:bot|agent)|bot|agent)(?:怎么用|如何使用|能做什么|有什么功能)[？?。！!\s]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:你|这个机器人|机器人|这个\s*(?:bot|agent)|bot|agent)(?:有|支持)?哪些(?:可用)?(?:指令|命令)[？?。！!\s]*$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^(?:有|支持)?哪些(?:可用)?(?:指令|命令)[？?。！!\s]*$"),
+    re.compile(r"^(?:查看|显示)?(?:指令列表|命令列表)[？?。！!\s]*$"),
+)
 
 
 def event_source_key(event: MessageEvent) -> Optional[str]:
@@ -134,6 +151,14 @@ class KJFWDHandler(MessageHandler):
         if reset_match:
             return self._handle_reset(event.group, message, claim.trigger_id, reset_match.group(1))
 
+        if is_help_request(request):
+            return self._send_direct_reply(
+                event.group,
+                message.session_id,
+                claim.trigger_id,
+                self._help_text(),
+            )
+
         force_search, request = self._parse_search_command(request)
         if force_search and not request:
             return self._send_direct_reply(
@@ -180,6 +205,14 @@ class KJFWDHandler(MessageHandler):
                     "已清除此前的聊天上下文，我们开始一次新对话。",
                 )
 
+            if is_help_request(request):
+                return self._send_direct_reply(
+                    group_name,
+                    message.session_id,
+                    trigger_id,
+                    self._help_text(),
+                )
+
             force_search, request = self._parse_search_command(request)
             if force_search and not request:
                 return self._send_direct_reply(
@@ -202,6 +235,9 @@ class KJFWDHandler(MessageHandler):
             )
         self._enqueue_job(group_name, job)
         return None
+
+    def _help_text(self) -> str:
+        return build_help_text(self.prompt_builder.capabilities.command_entries)
 
     @staticmethod
     def _parse_search_command(request: str) -> Tuple[bool, str]:
@@ -281,3 +317,28 @@ class KJFWDHandler(MessageHandler):
             jobs.put(None)
         for thread in self._threads.values():
             thread.join(timeout=10)
+
+
+def is_help_request(request: str) -> bool:
+    text = str(request or "").strip()
+    if HELP_COMMAND_RE.fullmatch(text):
+        return True
+    return any(pattern.fullmatch(text) for pattern in NATURAL_HELP_PATTERNS)
+
+
+def build_help_text(skill_entries: Sequence[Tuple[str, str]]) -> str:
+    lines = [
+        "我是柯基服务队群聊答疑助手，可以结合当前群聊记录回答电脑软硬件使用和维修问题，并在需要时联网核对资料。",
+        "",
+        "使用方法：在群里 @我并直接描述问题。普通提问不需要添加指令。",
+        "",
+        "可用指令：",
+        "/help：查看介绍和指令列表。",
+        "/new [新问题]：忽略此前聊天，开始新会话；可以直接接新问题。",
+        "/clear [新问题]：与 /new 相同。",
+        "/search <问题>：强制本次回答联网搜索；不写该指令时，我也会按需要主动搜索。",
+    ]
+    if skill_entries:
+        lines.extend(("", "可用技能指令："))
+        lines.extend(f"/{name} <问题>：{title}。" for name, title in skill_entries)
+    return "\n".join(lines)
