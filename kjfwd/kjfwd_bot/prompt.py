@@ -13,12 +13,19 @@ SKILL_COMMAND_RE = re.compile(r"(?:^|\s)/([\w.-]+)", re.UNICODE)
 
 
 def strip_at(content: str, nickname: str) -> str:
-    return (
-        str(content or "")
-        .replace(f"@{nickname}\u2005", "")
-        .replace(f"@{nickname}", "")
-        .strip()
+    text = str(content or "")
+    if not nickname:
+        return text.strip()
+
+    # 部分微信 UIA 文本会把 mention 暴露成“@机器人@微信 消息”。这里只移除
+    # 紧跟机器人 mention 的 @微信 残留，不全局删除真正提到“微信”的内容。
+    spacing = r"[\s\u00a0\u2005\u200b-\u200f\u2060]*"
+    pattern = re.compile(
+        rf"@{re.escape(nickname)}(?:{spacing}@微信)?{spacing}"
     )
+    cleaned = pattern.sub(" ", text)
+    cleaned = re.sub(r"[ \t\u00a0\u2005\u200b-\u200f\u2060]+", " ", cleaned)
+    return cleaned.strip()
 
 
 def explicit_skill_names(content: str) -> Tuple[str, ...]:

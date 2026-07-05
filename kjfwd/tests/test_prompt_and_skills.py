@@ -50,6 +50,19 @@ class PromptAndSkillTests(unittest.TestCase):
         cleaned = strip_at("@柯基服务队\u2005 /硬盘 检查一下", "柯基服务队")
         self.assertEqual("/硬盘 检查一下", cleaned)
 
+    def test_wechat_suffix_after_bot_mention_is_removed(self):
+        self.assertEqual(
+            "/clear 新问题",
+            strip_at("@柯基服务队@微信 /clear 新问题", "柯基服务队"),
+        )
+        self.assertEqual(
+            "/search 硬件参数",
+            strip_at("@柯基服务队\u2005 @微信\u2005 /search 硬件参数", "柯基服务队"),
+        )
+
+    def test_wechat_mention_is_not_removed_without_bot_mention(self):
+        self.assertEqual("@微信 消息", strip_at("@微信 消息", "柯基服务队"))
+
 
 if __name__ == "__main__":
     unittest.main()

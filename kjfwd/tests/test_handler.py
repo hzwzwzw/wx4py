@@ -12,6 +12,7 @@ from kjfwd.kjfwd_bot.handler import (
     append_reference_notice,
     build_help_text,
     is_help_request,
+    raw_control_mentions_bot,
 )
 from kjfwd.kjfwd_bot.history import HistoryStore
 from kjfwd.kjfwd_bot.prompt import PromptBuilder
@@ -23,6 +24,15 @@ class FakeRaw:
 
     def GetRuntimeId(self):
         return self.runtime_id
+
+
+class FakeControl:
+    def __init__(self, name="", children=()):
+        self.Name = name
+        self.children = list(children)
+
+    def GetChildren(self):
+        return self.children
 
 
 class FakeModel:
@@ -98,7 +108,11 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(1, len(self.actions))
         self.assertIsInstance(self.actions[0], ReplyAction)
         self.assertTrue(self.actions[0].content.endswith("（内容仅供参考）"))
+        deadline = time.time() + 1
         row = self.store.get_trigger(1)
+        while not row["sent"] and time.time() < deadline:
+            time.sleep(0.01)
+            row = self.store.get_trigger(1)
         self.assertEqual(1, row["sent"])
 
     def test_reused_runtime_id_with_new_content_is_not_treated_as_duplicate(self):
@@ -144,6 +158,35 @@ class HandlerTests(unittest.TestCase):
         time.sleep(0.05)
         self.assertEqual([], self.model.calls)
 
+    def test_inline_at_in_raw_child_controls_triggers_reply(self):
+        raw = FakeControl(
+            "普通消息文本",
+            [FakeControl("前文 "), FakeControl("@柯基服务队\u2005"), FakeControl(" 后文")],
+        )
+        event = MessageEvent(
+            group="客户群",
+            content="前文 后文",
+            timestamp=time.time(),
+            group_nickname="柯基服务队",
+            is_at_me=False,
+            raw=raw,
+        )
+        self.handler.handle(event)
+        self.assertTrue(self.action_ready.wait(2))
+        self.assertEqual(1, len(self.model.calls))
+
+    def test_inline_at_can_be_split_across_adjacent_controls(self):
+        raw = FakeControl("", [FakeControl("前文@"), FakeControl("柯基服务队"), FakeControl("后文")])
+        self.assertTrue(raw_control_mentions_bot(raw, "柯基服务队"))
+
+    def test_raw_fallback_does_not_match_nickname_without_at_sign(self):
+        raw = FakeControl("", [FakeControl("柯基服务队"), FakeControl("普通讨论")])
+        self.assertFalse(raw_control_mentions_bot(raw, "柯基服务队"))
+
+    def test_raw_fallback_respects_depth_limit(self):
+        raw = FakeControl("", [FakeControl("", [FakeControl("", [FakeControl("@柯基服务队")])])])
+        self.assertFalse(raw_control_mentions_bot(raw, "柯基服务队", max_depth=2))
+
     def test_help_command_returns_introduction_without_model_call(self):
         event = MessageEvent(
             group="客户群",
@@ -159,6 +202,36 @@ class HandlerTests(unittest.TestCase):
         self.assertIn("柯基服务队群聊答疑助手", self.actions[0].content)
         self.assertIn("/new [新问题]", self.actions[0].content)
         self.assertIn("/search <问题>", self.actions[0].content)
+
+    def test_help_command_survives_wechat_suffix_after_bot_mention(self):
+        event = MessageEvent(
+            group="客户群",
+            content="@柯基服务队@微信 /help",
+            timestamp=time.time(),
+            group_nickname="柯基服务队",
+            is_at_me=True,
+            raw=FakeRaw((12, 3)),
+        )
+        self.handler.handle(event)
+        self.assertTrue(self.action_ready.wait(1))
+        self.assertEqual([], self.model.calls)
+        self.assertIn("可用指令", self.actions[0].content)
+
+    def test_command_is_not_executed_from_arbitrary_message_position(self):
+        event = MessageEvent(
+            group="客户群",
+            content="@柯基服务队\u2005 请不要执行 /clear",
+            timestamp=time.time(),
+            group_nickname="柯基服务队",
+            is_at_me=True,
+            raw=FakeRaw((12, 4)),
+        )
+        self.handler.handle(event)
+        deadline = time.time() + 2
+        while not self.model.calls and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(1, len(self.model.calls))
+        self.assertIn("请不要执行 /clear", self.model.calls[0][1])
 
     def test_natural_help_question_returns_help(self):
         event = MessageEvent(

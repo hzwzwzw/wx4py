@@ -5,6 +5,7 @@ import logging
 import queue
 import re
 import threading
+from collections import deque
 from typing import Callable, Dict, Optional, Sequence, Tuple
 
 try:
@@ -77,6 +78,61 @@ def append_reference_notice(reply: str) -> str:
     return f"{text}\n{REFERENCE_NOTICE}"
 
 
+def raw_control_mentions_bot(
+    raw: object,
+    nickname: str,
+    *,
+    max_depth: int = 3,
+    max_nodes: int = 64,
+) -> bool:
+    """只读检查当前消息的 UIA 子控件，兼容行内 mention 被拆成富文本节点。"""
+    if raw is None or not nickname or max_depth < 0 or max_nodes <= 0:
+        return False
+
+    target = "@" + _normalize_mention_text(nickname)
+    pending = deque([(raw, 0)])
+    visited = set()
+    fragments = []
+    checked = 0
+
+    while pending and checked < max_nodes:
+        control, depth = pending.popleft()
+        identity = id(control)
+        if identity in visited:
+            continue
+        visited.add(identity)
+        checked += 1
+
+        try:
+            name = str(getattr(control, "Name", "") or "")
+        except Exception:
+            name = ""
+        normalized = _normalize_mention_text(name)
+        if normalized:
+            fragments.append(normalized)
+            if target in normalized:
+                return True
+
+        if depth >= max_depth:
+            continue
+        try:
+            children = list(control.GetChildren() or [])
+        except Exception:
+            children = []
+        remaining = max_nodes - checked - len(pending)
+        if remaining <= 0:
+            continue
+        pending.extend((child, depth + 1) for child in children[:remaining])
+
+    # 微信可能把“@”和昵称拆成相邻文本节点；按 UIA 顺序拼接后再检查。
+    return target in "".join(fragments)
+
+
+def _normalize_mention_text(text: str) -> str:
+    value = str(text or "").replace("＠", "@").replace("\u2005", "")
+    return re.sub(r"[\s\u00a0\u200b-\u200f\u202a-\u202e\u2060]", "", value)
+
+
 class KJFWDHandler(MessageHandler):
     requires_group_nickname = True
 
@@ -125,7 +181,13 @@ class KJFWDHandler(MessageHandler):
         message, _inserted = self.history.record_group_message(
             event.group, event.content, float(event.timestamp), source_key
         )
-        if not event.is_at_me:
+        nickname = self.bot_nicknames.get(event.group, event.group_nickname or "")
+        is_at_me = event.is_at_me
+        if not is_at_me:
+            is_at_me = raw_control_mentions_bot(event.raw, nickname)
+            if is_at_me:
+                logger.info("行内 @ UIA 回退命中：group=%s", event.group)
+        if not is_at_me:
             return None
 
         key = trigger_key(event, source_key)
@@ -141,7 +203,6 @@ class KJFWDHandler(MessageHandler):
             logger.info("忽略重复 @：group=%s trigger_id=%s status=%s", event.group, claim.trigger_id, claim.status)
             return None
 
-        nickname = self.bot_nicknames.get(event.group, event.group_nickname or "")
         request = strip_at(event.content, nickname)
         if not request:
             self.history.mark_trigger_failed(claim.trigger_id, "empty_request")
