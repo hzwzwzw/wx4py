@@ -21,6 +21,10 @@ MODEL_TOKEN_RE = re.compile(
     r"[A-Za-z]{1,12}[- ]?\d{2,}[A-Za-z0-9-]*|[A-Za-z]{2,}\d[A-Za-z0-9-]*|"
     r"\d{3,}[A-Za-z]+)"
 )
+CHINESE_MODEL_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{1,8}\d{1,4}[A-Za-z0-9-]*")
+PHYSICAL_SERVICE_RE = re.compile(
+    r"(?:清灰|硅脂|液金|拆机|散热|风扇|升级|更换|维修|加装|扩容)"
+)
 BANNED_FILLER_RE = re.compile(
     r"(?:这种问题比较常见|我们不着急|先别着急|可以尝试一个简单的方法|我来帮你一步步排查)"
 )
@@ -210,6 +214,8 @@ def should_require_search(user_prompt: str) -> bool:
     request = match.group(1) if match else str(user_prompt or "")
     # 出现可识别的具体型号时直接搜索，避免模型因“记得这个型号”而跳过核验。
     if MODEL_TOKEN_RE.search(request):
+        return True
+    if CHINESE_MODEL_TOKEN_RE.search(request) and PHYSICAL_SERVICE_RE.search(request):
         return True
     # “最新/官方/错误码”等本身要求外部核对；硬件参数类还需出现像型号的数字标识。
     if re.search(

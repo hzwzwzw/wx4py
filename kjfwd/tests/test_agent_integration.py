@@ -1,10 +1,14 @@
 import os
+import time
 import unittest
 from pathlib import Path
 
 from kjfwd.kjfwd_bot.agent import ToolCallingAgent
+from kjfwd.kjfwd_bot.capabilities import CapabilityRegistry
 from kjfwd.kjfwd_bot.config import LLMConfig, SearchConfig, load_dotenv
 from kjfwd.kjfwd_bot.llm import OpenAIChatClient
+from kjfwd.kjfwd_bot.models import ContextSnapshot, StoredMessage
+from kjfwd.kjfwd_bot.prompt import PromptBuilder
 from kjfwd.kjfwd_bot.search import BraveSearchClient, WebSearchTool
 
 
@@ -68,6 +72,21 @@ class AgentIntegrationTests(unittest.TestCase):
         )
         self.assertTrue(answer.strip())
         self.assertGreaterEqual(tool.call_count, 1)
+
+    def test_real_cleaning_request_detects_liquid_metal_risk(self):
+        agent, tool = self._build_agent()
+        question = "我有一台幻14的笔记本，可以拿来清灰吗？"
+        message = StoredMessage(1, "测试群", "group", question, time.time(), "session")
+        snapshot = ContextSnapshot("测试群", "session", 1, (message,))
+        builder = PromptBuilder(
+            ROOT / "kjfwd" / "prompts" / "system.md",
+            CapabilityRegistry.from_skill_directory(ROOT / "kjfwd" / "skills"),
+        )
+        system_prompt, user_prompt = builder.build(snapshot, question, ())
+        answer = agent.complete(system_prompt, user_prompt)
+        self.assertGreaterEqual(tool.call_count, 1)
+        self.assertIn("液金", answer)
+        self.assertNotIn("可以拿到科技服务队清灰", answer)
 
 
 if __name__ == "__main__":

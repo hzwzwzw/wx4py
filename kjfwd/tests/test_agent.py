@@ -109,6 +109,11 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(
             should_require_search("<current_request>Intel N100 是哪一年发布的？</current_request>")
         )
+        self.assertTrue(
+            should_require_search(
+                "<current_request>我有一台幻14的笔记本，可以拿来清灰吗？</current_request>"
+            )
+        )
 
     def test_sources_are_appended_as_plain_text(self):
         result = append_sources(
