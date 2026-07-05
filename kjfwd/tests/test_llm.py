@@ -39,6 +39,47 @@ class LLMTests(unittest.TestCase):
         self.assertEqual("test-model", captured["body"]["model"])
         self.assertEqual(12, captured["timeout"])
 
+    def test_chat_sends_native_tools_and_tool_choice(self):
+        captured = {}
+
+        def urlopen(request, timeout):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call-1",
+                                        "type": "function",
+                                        "function": {"name": "web_search", "arguments": "{}"},
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            )
+
+        client = OpenAIChatClient(
+            LLMConfig("https://example.test/v1", "test-model", "secret"),
+            urlopen=urlopen,
+        )
+        tool = {"type": "function", "function": {"name": "web_search"}}
+        message = client.chat(
+            [{"role": "user", "content": "question"}],
+            tools=[tool],
+            tool_choice={"type": "function", "function": {"name": "web_search"}},
+            thinking=False,
+        )
+        self.assertEqual("call-1", message["tool_calls"][0]["id"])
+        self.assertEqual([tool], captured["body"]["tools"])
+        self.assertEqual("web_search", captured["body"]["tool_choice"]["function"]["name"])
+        self.assertEqual({"type": "disabled"}, captured["body"]["thinking"])
+
 
 if __name__ == "__main__":
     unittest.main()

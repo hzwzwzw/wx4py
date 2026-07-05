@@ -18,6 +18,19 @@
     "timeout_seconds": 60,
     "retries": 2
   },
+  "search": {
+    "enabled": true,
+    "api_key_env": "BRAVE_KEY",
+    "endpoint": "https://api.search.brave.com/res/v1/llm/context",
+    "timeout_seconds": 20,
+    "retries": 2,
+    "max_results": 5,
+    "max_context_tokens": 4096,
+    "max_snippets": 20,
+    "cache_seconds": 900,
+    "minimum_request_interval_seconds": 1.1,
+    "max_tool_rounds": 2
+  },
   "history": {
     "database_path": "data/kjfwd.db",
     "idle_timeout_seconds": 1800,

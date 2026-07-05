@@ -59,9 +59,25 @@ class HistoryConfig:
 
 
 @dataclass(frozen=True)
+class SearchConfig:
+    enabled: bool
+    api_key: str
+    endpoint: str = "https://api.search.brave.com/res/v1/llm/context"
+    timeout_seconds: float = 20.0
+    retries: int = 2
+    max_results: int = 5
+    max_context_tokens: int = 4096
+    max_snippets: int = 20
+    cache_seconds: int = 900
+    minimum_request_interval_seconds: float = 1.1
+    max_tool_rounds: int = 2
+
+
+@dataclass(frozen=True)
 class BotConfig:
     groups: Tuple[GroupConfig, ...]
     llm: LLMConfig
+    search: SearchConfig
     history: HistoryConfig
     system_prompt_path: Path
     skills_path: Path
@@ -129,6 +145,37 @@ def load_config(
     if min(history.idle_timeout_seconds, history.max_messages, history.max_characters) <= 0:
         raise ValueError("history 的时间、消息数和字符数限制必须大于 0")
 
+    search_data = data.get("search", {})
+    search_enabled = bool(search_data.get("enabled", True))
+    search_api_key = _env_value(str(search_data.get("api_key_env", "BRAVE_KEY")))
+    if search_enabled and not search_api_key:
+        raise ValueError("联网搜索已启用，但未找到 Brave API Key 环境变量")
+    search = SearchConfig(
+        enabled=search_enabled,
+        api_key=search_api_key,
+        endpoint=str(
+            search_data.get("endpoint", "https://api.search.brave.com/res/v1/llm/context")
+        ).strip(),
+        timeout_seconds=float(search_data.get("timeout_seconds", 20)),
+        retries=int(search_data.get("retries", 2)),
+        max_results=int(search_data.get("max_results", 5)),
+        max_context_tokens=int(search_data.get("max_context_tokens", 4096)),
+        max_snippets=int(search_data.get("max_snippets", 20)),
+        cache_seconds=int(search_data.get("cache_seconds", 900)),
+        minimum_request_interval_seconds=float(
+            search_data.get("minimum_request_interval_seconds", 1.1)
+        ),
+        max_tool_rounds=int(search_data.get("max_tool_rounds", 2)),
+    )
+    if search.enabled and min(
+        search.timeout_seconds,
+        search.max_results,
+        search.max_context_tokens,
+        search.max_snippets,
+        search.max_tool_rounds,
+    ) <= 0:
+        raise ValueError("search 的超时、结果数、上下文和工具轮数必须大于 0")
+
     return BotConfig(
         groups=groups,
         llm=LLMConfig(
@@ -140,6 +187,7 @@ def load_config(
             timeout_seconds=float(llm_data.get("timeout_seconds", 60)),
             retries=int(llm_data.get("retries", 2)),
         ),
+        search=search,
         history=history,
         system_prompt_path=_resolve_path(base_dir, data.get("system_prompt_path", "prompts/system.md")),
         skills_path=_resolve_path(base_dir, data.get("skills_path", "skills")),

@@ -24,8 +24,8 @@ class FakeModel:
     def __init__(self):
         self.calls = []
 
-    def complete(self, system_prompt, user_prompt):
-        self.calls.append((system_prompt, user_prompt))
+    def complete(self, system_prompt, user_prompt, *, force_search=False):
+        self.calls.append((system_prompt, user_prompt, force_search))
         return "请先断电，再检查电源线。"
 
 
@@ -34,7 +34,7 @@ class BlockingModel:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def complete(self, system_prompt, user_prompt):
+    def complete(self, system_prompt, user_prompt, *, force_search=False):
         self.started.set()
         self.release.wait(2)
         return "这是一条已经过期的回复。"
@@ -188,6 +188,50 @@ class HandlerTests(unittest.TestCase):
         user_prompt = self.model.calls[0][1]
         self.assertNotIn("旧信息", user_prompt)
         self.assertIn("<current_request>\n如何修复系统？", user_prompt)
+
+    def test_new_alias_with_following_text_starts_new_request(self):
+        now = time.time()
+        self.handler.handle(
+            MessageEvent("客户群", "应被忽略的旧内容", now, "柯基服务队", False, FakeRaw((10, 1)))
+        )
+        self.handler.handle(
+            MessageEvent(
+                "客户群",
+                "@柯基服务队\u2005 /new 新会话的问题",
+                now + 1,
+                "柯基服务队",
+                True,
+                FakeRaw((10, 2)),
+            )
+        )
+        deadline = time.time() + 2
+        while not self.model.calls and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(1, len(self.model.calls))
+        user_prompt = self.model.calls[0][1]
+        self.assertNotIn("应被忽略的旧内容", user_prompt)
+        self.assertIn("<current_request>\n新会话的问题", user_prompt)
+
+    def test_search_command_forces_search_and_is_removed_from_request(self):
+        now = time.time()
+        self.handler.handle(
+            MessageEvent(
+                "客户群",
+                "@柯基服务队\u2005 /search 某硬件型号参数",
+                now,
+                "柯基服务队",
+                True,
+                FakeRaw((11, 1)),
+            )
+        )
+        deadline = time.time() + 2
+        while not self.model.calls and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(1, len(self.model.calls))
+        _, user_prompt, force_search = self.model.calls[0]
+        self.assertTrue(force_search)
+        self.assertIn("<current_request>\n某硬件型号参数", user_prompt)
+        self.assertNotIn("<current_request>\n/search", user_prompt)
 
     def test_clear_discards_an_inflight_old_reply(self):
         blocking_model = BlockingModel()

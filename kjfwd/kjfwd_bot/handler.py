@@ -19,7 +19,8 @@ from .prompt import PromptBuilder, explicit_skill_names, strip_at
 
 logger = logging.getLogger(__name__)
 REFERENCE_NOTICE = "（内容仅供参考）"
-CLEAR_COMMAND_RE = re.compile(r"^/clear(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+RESET_COMMAND_RE = re.compile(r"^/(?:clear|new)(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
+SEARCH_COMMAND_RE = re.compile(r"^/search(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL)
 
 
 def event_source_key(event: MessageEvent) -> Optional[str]:
@@ -129,9 +130,18 @@ class KJFWDHandler(MessageHandler):
             self.history.mark_trigger_failed(claim.trigger_id, "empty_request")
             return None
 
-        clear_match = CLEAR_COMMAND_RE.fullmatch(request)
-        if clear_match:
-            return self._handle_clear(event.group, message, claim.trigger_id, clear_match.group(1))
+        reset_match = RESET_COMMAND_RE.fullmatch(request)
+        if reset_match:
+            return self._handle_reset(event.group, message, claim.trigger_id, reset_match.group(1))
+
+        force_search, request = self._parse_search_command(request)
+        if force_search and not request:
+            return self._send_direct_reply(
+                event.group,
+                message.session_id,
+                claim.trigger_id,
+                "请在 /search 后写明需要查询的问题。",
+            )
 
         with self._context_lock:
             generation = self._context_generations[event.group]
@@ -144,11 +154,12 @@ class KJFWDHandler(MessageHandler):
             request,
             explicit_skill_names(request),
             generation,
+            force_search,
         )
         self._enqueue_job(event.group, job)
         return None
 
-    def _handle_clear(
+    def _handle_reset(
         self,
         group_name: str,
         message,
@@ -162,19 +173,21 @@ class KJFWDHandler(MessageHandler):
 
             request = str(following_request or "").strip()
             if not request:
-                try:
-                    reply = append_reference_notice("已清除此前的聊天上下文，我们开始一次新对话。")
-                    stored = self.history.record_assistant_message(
-                        group_name, message.session_id, reply
-                    )
-                    if self._emit_action is None:
-                        raise RuntimeError("消息发送器尚未初始化")
-                    self._emit_action(ReplyAction(group=group_name, content=reply))
-                    self.history.mark_trigger_sent(trigger_id, stored.id)
-                except Exception as exc:
-                    self.history.mark_trigger_failed(trigger_id, str(exc))
-                    logger.exception("发送 /clear 确认失败：group=%s", group_name)
-                return None
+                return self._send_direct_reply(
+                    group_name,
+                    message.session_id,
+                    trigger_id,
+                    "已清除此前的聊天上下文，我们开始一次新对话。",
+                )
+
+            force_search, request = self._parse_search_command(request)
+            if force_search and not request:
+                return self._send_direct_reply(
+                    group_name,
+                    message.session_id,
+                    trigger_id,
+                    "请在 /search 后写明需要查询的问题。",
+                )
 
             snapshot = self.history.snapshot(
                 message, max_messages=self.max_messages, max_characters=self.max_characters
@@ -185,8 +198,31 @@ class KJFWDHandler(MessageHandler):
                 request,
                 explicit_skill_names(request),
                 generation,
+                force_search,
             )
         self._enqueue_job(group_name, job)
+        return None
+
+    @staticmethod
+    def _parse_search_command(request: str) -> Tuple[bool, str]:
+        match = SEARCH_COMMAND_RE.fullmatch(request)
+        if not match:
+            return False, request
+        return True, str(match.group(1) or "").strip()
+
+    def _send_direct_reply(
+        self, group_name: str, session_id: str, trigger_id: int, content: str
+    ):
+        try:
+            reply = append_reference_notice(content)
+            stored = self.history.record_assistant_message(group_name, session_id, reply)
+            if self._emit_action is None:
+                raise RuntimeError("消息发送器尚未初始化")
+            self._emit_action(ReplyAction(group=group_name, content=reply))
+            self.history.mark_trigger_sent(trigger_id, stored.id)
+        except Exception as exc:
+            self.history.mark_trigger_failed(trigger_id, str(exc))
+            logger.exception("发送直接回复失败：group=%s", group_name)
         return None
 
     def _enqueue_job(self, group_name: str, job: ReplyJob) -> None:
@@ -215,7 +251,9 @@ class KJFWDHandler(MessageHandler):
                 system_prompt, user_prompt = self.prompt_builder.build(
                     job.snapshot, job.clean_request, job.explicit_skills
                 )
-                reply = self.model.complete(system_prompt, user_prompt).strip()
+                reply = self.model.complete(
+                    system_prompt, user_prompt, force_search=job.force_search
+                ).strip()
                 if not reply:
                     raise RuntimeError("模型返回空回复")
                 reply = append_reference_notice(reply)

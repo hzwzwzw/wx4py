@@ -4,13 +4,15 @@ import json
 import time
 import urllib.error
 import urllib.request
-from typing import Callable, Protocol
+from typing import Any, Callable, Dict, List, Optional, Protocol
 
 from .config import LLMConfig
 
 
 class ChatModel(Protocol):
-    def complete(self, system_prompt: str, user_prompt: str) -> str:
+    def complete(
+        self, system_prompt: str, user_prompt: str, *, force_search: bool = False
+    ) -> str:
         ...
 
 
@@ -27,16 +29,39 @@ class OpenAIChatClient:
         self._sleep = sleep
         self.url = self._endpoint(config.base_url)
 
-    def complete(self, system_prompt: str, user_prompt: str) -> str:
-        payload = {
-            "model": self.config.model,
-            "messages": [
+    def complete(
+        self, system_prompt: str, user_prompt: str, *, force_search: bool = False
+    ) -> str:
+        message = self.chat(
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
-            ],
+            ]
+        )
+        text = str(message.get("content") or "").strip()
+        if not text:
+            raise RuntimeError("LLM 返回了空回复")
+        return text
+
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        thinking: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "model": self.config.model,
+            "messages": messages,
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
         }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice or "auto"
+        if thinking is not None:
+            payload["thinking"] = {"type": "enabled" if thinking else "disabled"}
         request = urllib.request.Request(
             self.url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -52,11 +77,10 @@ class OpenAIChatClient:
             try:
                 with self._urlopen(request, timeout=self.config.timeout_seconds) as response:
                     data = json.loads(response.read().decode("utf-8"))
-                text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                text = str(text or "").strip()
-                if not text:
+                message = data.get("choices", [{}])[0].get("message", {})
+                if not message.get("content") and not message.get("tool_calls"):
                     raise RuntimeError("LLM 返回了空回复")
-                return text
+                return dict(message)
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")[:1000]
                 retryable = exc.code == 429 or 500 <= exc.code < 600

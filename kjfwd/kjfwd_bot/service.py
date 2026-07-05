@@ -9,11 +9,13 @@ except ImportError:
     from src import WeChatClient
 
 from .capabilities import CapabilityRegistry
+from .agent import ToolCallingAgent
 from .config import BotConfig, load_config
 from .handler import KJFWDHandler
 from .history import HistoryStore
 from .llm import OpenAIChatClient
 from .prompt import PromptBuilder
+from .search import BraveSearchClient, WebSearchTool
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +23,20 @@ logger = logging.getLogger(__name__)
 def build_handler(config: BotConfig, history: HistoryStore) -> KJFWDHandler:
     capabilities = CapabilityRegistry.from_skill_directory(config.skills_path)
     logger.info("已加载 skills: %s", ", ".join(capabilities.names) or "无")
+    llm_client = OpenAIChatClient(config.llm)
+    tools = []
+    if config.search.enabled:
+        tools.append(WebSearchTool(BraveSearchClient(config.search)))
+    agent = ToolCallingAgent(
+        llm_client,
+        tools,
+        max_tool_rounds=config.search.max_tool_rounds,
+    )
     return KJFWDHandler(
         groups=config.group_names,
         bot_nicknames=config.group_nicknames,
         history=history,
-        model=OpenAIChatClient(config.llm),
+        model=agent,
         prompt_builder=PromptBuilder(config.system_prompt_path, capabilities),
         max_messages=config.history.max_messages,
         max_characters=config.history.max_characters,

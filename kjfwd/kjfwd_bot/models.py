@@ -38,3 +38,4 @@ class ReplyJob:
     clean_request: str
     explicit_skills: Tuple[str, ...]
     context_generation: int
+    force_search: bool = False

@@ -3,11 +3,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 
 class Capability(ABC):
-    """可扩展能力边界；未来的联网查询或函数工具也从这里接入。"""
+    """写入 system prompt 的知识与行为规范能力。"""
 
     @property
     @abstractmethod
@@ -18,6 +18,22 @@ class Capability(ABC):
     def system_prompt(self, explicitly_requested: bool) -> str:
         raise NotImplementedError
 
+
+class ToolCapability(ABC):
+    """由模型通过原生 tool call 调用的受控外部能力。"""
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def definition(self) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def execute(self, arguments: Dict[str, Any]) -> str:
+        raise NotImplementedError
 
 @dataclass(frozen=True)
 class PromptSkill(Capability):

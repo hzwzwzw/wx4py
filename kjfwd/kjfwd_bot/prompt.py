@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence, Tuple
+from typing import Callable, Sequence, Tuple
 
 from .capabilities import CapabilityRegistry
 from .models import ContextSnapshot
@@ -26,9 +26,16 @@ def explicit_skill_names(content: str) -> Tuple[str, ...]:
 
 
 class PromptBuilder:
-    def __init__(self, system_prompt_path: Path, capabilities: CapabilityRegistry):
+    def __init__(
+        self,
+        system_prompt_path: Path,
+        capabilities: CapabilityRegistry,
+        *,
+        now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
+    ):
         self.system_prompt_path = Path(system_prompt_path)
         self.capabilities = capabilities
+        self.now = now
 
     def build(
         self,
@@ -37,7 +44,10 @@ class PromptBuilder:
         explicit_skills: Sequence[str],
     ) -> Tuple[str, str]:
         base = self.system_prompt_path.read_text(encoding="utf-8-sig").strip()
-        system_prompt = base + "\n\n" + self.capabilities.render(explicit_skills)
+        runtime_context = f"<runtime_context>当前日期：{self.now().date().isoformat()}</runtime_context>"
+        system_prompt = (
+            base + "\n\n" + runtime_context + "\n\n" + self.capabilities.render(explicit_skills)
+        )
         transcript = []
         for message in snapshot.messages:
             timestamp = datetime.fromtimestamp(message.observed_at).strftime("%H:%M:%S")

@@ -12,6 +12,7 @@
 API_KEY=...
 BASE_URL=https://example.com/v1
 MODEL=model-name
+BRAVE_KEY=...
 ```
 
 
@@ -43,7 +44,13 @@ MODEL=model-name
 
 当前未实现发送者识别和成员白名单，任何人 @ 机器人都可以触发。
 
-发送 `@机器人昵称 /clear` 会忽略该群此前的聊天上下文并开始新会话。也可以使用 `@机器人昵称 /clear 新问题`，清空后直接询问新问题。清空时，此前仍在排队或生成中的旧回复会被丢弃。
+发送 `@机器人昵称 /clear` 或 `@机器人昵称 /new` 会忽略该群此前的聊天上下文并开始新会话。命令后可以直接接新问题，例如 `@机器人昵称 /new 新会话的问题`；重置时，此前仍在排队或生成中的旧回复会被丢弃。
+
+联网搜索默认启用。模型会在核对特定硬件参数、官方文档、错误码和可能变化的信息时主动调用 Brave Search。`@机器人昵称 /search 问题` 会强制本次回答至少搜索一次；`/search` 只是开关，不会作为 skill 或回答内容传给模型。
+
+为避免模型因“记得这个型号”而跳过核验，当前问题中出现可识别的具体硬件或软件型号时，代码会直接要求搜索。每次请求还会把当天日期加入 system prompt，防止“最新”查询被错误限定到旧年份。
+
+使用搜索结果的回答会经过一次基于原始网页片段的事实和风格复核。最终来源标题与 URL 由代码直接从 Brave 响应附加，不依赖模型自行生成；普通回答默认控制在约 700 字以内，`/explain` 可放宽到约 2500 字。
 
 ## 测试
 
@@ -59,3 +66,15 @@ MODEL=model-name
 $env:KJFWD_RUN_LLM_TEST='1'
 .\.venv\Scripts\python.exe -m unittest kjfwd.tests.test_llm_integration -v
 ```
+
+真实 Brave 搜索及完整 Agent tool call 测试同样不会连接微信：
+
+```powershell
+$env:KJFWD_RUN_SEARCH_TEST='1'
+.\.venv\Scripts\python.exe -m unittest kjfwd.tests.test_search_integration -v
+
+$env:KJFWD_RUN_AGENT_TEST='1'
+.\.venv\Scripts\python.exe -m unittest kjfwd.tests.test_agent_integration -v
+```
+
+DeepSeek 当前不允许在思考模式下指定或强制工具，因此工具调用轮会显式关闭思考模式；普通无工具回答不受影响。
