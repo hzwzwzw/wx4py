@@ -74,11 +74,28 @@ class SearchConfig:
 
 
 @dataclass(frozen=True)
+class ConversationPoolConfig:
+    active_ttl_seconds: int = 1800
+    max_active: int = 5
+    global_fallback_seconds: int = 3600
+    global_fallback_max_messages: int = 80
+    low_information_recent_reply_seconds: int = 180
+
+
+@dataclass(frozen=True)
+class DebugConfig:
+    conversation_id_in_reply: bool = True
+    router_decision_log: bool = True
+
+
+@dataclass(frozen=True)
 class BotConfig:
     groups: Tuple[GroupConfig, ...]
     llm: LLMConfig
     search: SearchConfig
     history: HistoryConfig
+    conversation_pool: ConversationPoolConfig
+    debug: DebugConfig
     system_prompt_path: Path
     skills_path: Path
     queue_size_per_group: int = 5
@@ -176,6 +193,31 @@ def load_config(
     ) <= 0:
         raise ValueError("search 的超时、结果数、上下文和工具轮数必须大于 0")
 
+    pool_data = data.get("conversation_pool", {})
+    conversation_pool = ConversationPoolConfig(
+        active_ttl_seconds=int(pool_data.get("active_ttl_seconds", 1800)),
+        max_active=int(pool_data.get("max_active", 5)),
+        global_fallback_seconds=int(pool_data.get("global_fallback_seconds", 3600)),
+        global_fallback_max_messages=int(pool_data.get("global_fallback_max_messages", 80)),
+        low_information_recent_reply_seconds=int(
+            pool_data.get("low_information_recent_reply_seconds", 180)
+        ),
+    )
+    if min(
+        conversation_pool.active_ttl_seconds,
+        conversation_pool.max_active,
+        conversation_pool.global_fallback_seconds,
+        conversation_pool.global_fallback_max_messages,
+        conversation_pool.low_information_recent_reply_seconds,
+    ) <= 0:
+        raise ValueError("conversation_pool 的时间和数量限制必须大于 0")
+
+    debug_data = data.get("debug", {})
+    debug = DebugConfig(
+        conversation_id_in_reply=bool(debug_data.get("conversation_id_in_reply", True)),
+        router_decision_log=bool(debug_data.get("router_decision_log", True)),
+    )
+
     return BotConfig(
         groups=groups,
         llm=LLMConfig(
@@ -189,6 +231,8 @@ def load_config(
         ),
         search=search,
         history=history,
+        conversation_pool=conversation_pool,
+        debug=debug,
         system_prompt_path=_resolve_path(base_dir, data.get("system_prompt_path", "prompts/system.md")),
         skills_path=_resolve_path(base_dir, data.get("skills_path", "skills")),
         queue_size_per_group=int(data.get("queue_size_per_group", 5)),

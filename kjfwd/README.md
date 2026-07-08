@@ -37,6 +37,9 @@ BRAVE_KEY=...
 
 - 群内每条可见增量消息都会写入 SQLite。
 - 相邻消息超过 30 分钟时开启新会话。
+- 触发模型时会先做隐式 conversation 路由。明确承接某个已有问题时，只使用该 conversation 的历史；明显是新问题时新建 conversation；无法判定时使用最近 1 小时全局群聊历史作为 fallback，并提示模型这些历史可能包含多组交错话题。
+- 默认 debug 会在回复开头显示 `[conv: xxxxxxxx]` 或 `[conv: ambiguous]`，便于观察路由效果。稳定后可在 `debug.conversation_id_in_reply` 中关闭。
+- 普通未 @ 消息只进入全局群聊历史，不会自动污染任何确定 conversation；ambiguous fallback 的消息和回复也不会并入确定 conversation。
 - 触发模型时冻结当时的上下文，默认最多 100 条、16,000 字符。
 - 每条 @ 都会被原子认领；同一消息被监听层紧邻重复投递时不会再次请求模型。UIA RuntimeId 只作为当前事件的特征，不会被当成永久唯一 ID，因为微信刷新虚拟列表后可能复用它。
 - `triggers.sent=1` 表示回复已交给 wx4py 的串行发送队列。微信 UIA 没有最终送达回执，因此它不等同于对端确认收到。

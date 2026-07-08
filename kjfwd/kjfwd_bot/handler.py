@@ -15,8 +15,10 @@ except ImportError:  # 直接从源码目录运行时的兼容路径
 
 from .history import HistoryStore
 from .llm import ChatModel
-from .models import ReplyJob
+from .models import ConversationRoute, ReplyJob
 from .prompt import PromptBuilder, explicit_skill_names, strip_at
+from .config import ConversationPoolConfig
+from .router import AlwaysNewRouter, Router, is_low_information_followup, title_from_request
 
 logger = logging.getLogger(__name__)
 REFERENCE_NOTICE = "（内容仅供参考）"
@@ -144,19 +146,25 @@ class KJFWDHandler(MessageHandler):
         history: HistoryStore,
         model: ChatModel,
         prompt_builder: PromptBuilder,
+        router: Optional[Router] = None,
         max_messages: int = 100,
         max_characters: int = 16000,
         trigger_dedupe_seconds: float = 1.0,
         queue_size_per_group: int = 5,
+        conversation_pool: ConversationPoolConfig = ConversationPoolConfig(),
+        show_conversation_id: bool = True,
     ):
         self.groups = groups
         self.bot_nicknames = dict(bot_nicknames)
         self.history = history
         self.model = model
+        self.router = router or AlwaysNewRouter()
         self.prompt_builder = prompt_builder
         self.max_messages = max_messages
         self.max_characters = max_characters
         self.trigger_dedupe_seconds = trigger_dedupe_seconds
+        self.conversation_pool = conversation_pool
+        self.show_conversation_id = show_conversation_id
         self._queues = {name: queue.Queue(maxsize=queue_size_per_group) for name in groups}
         self._threads: Dict[str, threading.Thread] = {}
         self._emit_action: Optional[Callable] = None
@@ -213,27 +221,40 @@ class KJFWDHandler(MessageHandler):
             return self._handle_reset(event.group, message, claim.trigger_id, reset_match.group(1))
 
         if is_help_request(request):
+            conversation = self.history.create_conversation(
+                event.group, title="帮助", now=float(event.timestamp), status="ambiguous"
+            )
+            message = self.history.bind_message_to_conversation(
+                message.id, conversation.id, trigger_at=float(event.timestamp)
+            )
             return self._send_direct_reply(
                 event.group,
                 message.session_id,
                 claim.trigger_id,
                 self._help_text(),
+                conversation_id=conversation.id,
             )
 
         force_search, request = self._parse_search_command(request)
         if force_search and not request:
+            conversation = self.history.create_conversation(
+                event.group, title="搜索指令", now=float(event.timestamp), status="ambiguous"
+            )
+            message = self.history.bind_message_to_conversation(
+                message.id, conversation.id, trigger_at=float(event.timestamp)
+            )
             return self._send_direct_reply(
                 event.group,
                 message.session_id,
                 claim.trigger_id,
                 "请在 /search 后写明需要查询的问题。",
+                conversation_id=conversation.id,
             )
 
         with self._context_lock:
             generation = self._context_generations[event.group]
-        snapshot = self.history.snapshot(
-            message, max_messages=self.max_messages, max_characters=self.max_characters
-        )
+        message, route = self._route_message(event.group, message, request, float(event.timestamp))
+        snapshot = self._snapshot_for_route(message, route)
         job = ReplyJob(
             claim.trigger_id,
             snapshot,
@@ -258,12 +279,19 @@ class KJFWDHandler(MessageHandler):
             message = self.history.start_new_session(message.id)
 
             request = str(following_request or "").strip()
+            conversation = self.history.create_conversation(
+                group_name, title=title_from_request(request) if request else "新会话", now=message.observed_at
+            )
+            message = self.history.bind_message_to_conversation(
+                message.id, conversation.id, trigger_at=message.observed_at
+            )
             if not request:
                 return self._send_direct_reply(
                     group_name,
                     message.session_id,
                     trigger_id,
                     "已清除此前的聊天上下文，我们开始一次新对话。",
+                    conversation_id=conversation.id,
                 )
 
             if is_help_request(request):
@@ -272,6 +300,7 @@ class KJFWDHandler(MessageHandler):
                     message.session_id,
                     trigger_id,
                     self._help_text(),
+                    conversation_id=conversation.id,
                 )
 
             force_search, request = self._parse_search_command(request)
@@ -281,10 +310,14 @@ class KJFWDHandler(MessageHandler):
                     message.session_id,
                     trigger_id,
                     "请在 /search 后写明需要查询的问题。",
+                    conversation_id=conversation.id,
                 )
 
-            snapshot = self.history.snapshot(
-                message, max_messages=self.max_messages, max_characters=self.max_characters
+            snapshot = self.history.conversation_snapshot(
+                message,
+                conversation.id,
+                max_messages=self.max_messages,
+                max_characters=self.max_characters,
             )
             job = ReplyJob(
                 trigger_id,
@@ -297,6 +330,81 @@ class KJFWDHandler(MessageHandler):
         self._enqueue_job(group_name, job)
         return None
 
+    def _route_message(self, group_name: str, message, request: str, timestamp: float):
+        candidates = self.history.list_active_conversations(
+            group_name,
+            now=timestamp,
+            ttl_seconds=self.conversation_pool.active_ttl_seconds,
+            limit=self.conversation_pool.max_active,
+        )
+        if is_low_information_followup(request):
+            recent = [
+                item
+                for item in candidates
+                if timestamp - item.updated_at
+                <= self.conversation_pool.low_information_recent_reply_seconds
+            ]
+            if len(recent) == 1:
+                route = ConversationRoute("use_existing", conversation_id=recent[0].id, reason="low_information_single_recent")
+            elif candidates:
+                route = ConversationRoute("ambiguous", reason="low_information_multiple_candidates")
+            else:
+                route = ConversationRoute("create_new", title=title_from_request(request), reason="low_information_no_candidates")
+        else:
+            recent_messages = {
+                item.id: self.history.conversation_recent_messages(item.id, limit=6)
+                for item in candidates
+            }
+            route = self.router.route(
+                group_name=group_name,
+                request=request,
+                candidates=candidates,
+                recent_messages=recent_messages,
+            )
+
+        if route.action == "use_existing" and route.conversation_id:
+            message = self.history.bind_message_to_conversation(
+                message.id, route.conversation_id, trigger_at=timestamp
+            )
+        elif route.action == "create_new":
+            conversation = self.history.create_conversation(
+                group_name, title=route.title or title_from_request(request), now=timestamp
+            )
+            route = ConversationRoute("create_new", conversation_id=conversation.id, title=conversation.title, reason=route.reason)
+            message = self.history.bind_message_to_conversation(
+                message.id, conversation.id, trigger_at=timestamp
+            )
+        else:
+            ambiguous = self.history.create_conversation(
+                group_name, title="未判定追问", now=timestamp, status="ambiguous"
+            )
+            route = ConversationRoute("ambiguous", conversation_id=ambiguous.id, reason=route.reason)
+            message = self.history.bind_message_to_conversation(
+                message.id, ambiguous.id, trigger_at=timestamp
+            )
+        logger.info("会话路由：group=%s action=%s conversation=%s reason=%s", group_name, route.action, route.conversation_id, route.reason)
+        return message, route
+
+    def _snapshot_for_route(self, message, route: ConversationRoute):
+        if route.action == "ambiguous":
+            return self.history.ambiguous_snapshot(
+                message,
+                conversation_id=route.conversation_id,
+                global_seconds=self.conversation_pool.global_fallback_seconds,
+                global_max_messages=self.conversation_pool.global_fallback_max_messages,
+                max_characters=self.max_characters,
+            )
+        if route.conversation_id:
+            return self.history.conversation_snapshot(
+                message,
+                route.conversation_id,
+                max_messages=self.max_messages,
+                max_characters=self.max_characters,
+            )
+        return self.history.snapshot(
+            message, max_messages=self.max_messages, max_characters=self.max_characters
+        )
+
     def _help_text(self) -> str:
         return build_help_text(self.prompt_builder.capabilities.command_entries)
 
@@ -308,11 +416,18 @@ class KJFWDHandler(MessageHandler):
         return True, str(match.group(1) or "").strip()
 
     def _send_direct_reply(
-        self, group_name: str, session_id: str, trigger_id: int, content: str
+        self,
+        group_name: str,
+        session_id: str,
+        trigger_id: int,
+        content: str,
+        conversation_id: Optional[str] = None,
     ):
         try:
-            reply = append_reference_notice(content)
-            stored = self.history.record_assistant_message(group_name, session_id, reply)
+            reply = self._finalize_reply(content, conversation_id)
+            stored = self.history.record_assistant_message(
+                group_name, session_id, reply, conversation_id=conversation_id
+            )
             if self._emit_action is None:
                 raise RuntimeError("消息发送器尚未初始化")
             self._emit_action(ReplyAction(group=group_name, content=reply))
@@ -353,13 +468,16 @@ class KJFWDHandler(MessageHandler):
                 ).strip()
                 if not reply:
                     raise RuntimeError("模型返回空回复")
-                reply = append_reference_notice(reply)
+                reply = self._finalize_reply(reply, job.snapshot.conversation_id, job.snapshot.ambiguous)
                 with self._context_lock:
                     if job.context_generation != self._context_generations[group_name]:
                         self.history.mark_trigger_failed(job.trigger_id, "cleared")
                         continue
                     stored = self.history.record_assistant_message(
-                        group_name, job.snapshot.session_id, reply
+                        group_name,
+                        job.snapshot.session_id,
+                        reply,
+                        conversation_id=job.snapshot.conversation_id,
                     )
                     if self._emit_action is None:
                         raise RuntimeError("消息发送器尚未初始化")
@@ -371,6 +489,19 @@ class KJFWDHandler(MessageHandler):
                 logger.exception("生成群回复失败：group=%s trigger_id=%s", group_name, job.trigger_id)
             finally:
                 jobs.task_done()
+
+    def _finalize_reply(
+        self,
+        content: str,
+        conversation_id: Optional[str],
+        ambiguous: bool = False,
+    ) -> str:
+        text = str(content or "").strip()
+        if self.show_conversation_id:
+            label = "ambiguous" if ambiguous else (conversation_id[:8] if conversation_id else "direct")
+            if not text.startswith("[conv:"):
+                text = f"[conv: {label}]\n{text}"
+        return append_reference_notice(text)
 
     def stop(self) -> None:
         self._stop_event.set()

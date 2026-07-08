@@ -43,7 +43,7 @@ class PromptAndSkillTests(unittest.TestCase):
             system_prompt, user_prompt = builder.build(snapshot, "怎么修？", ())
             self.assertIn("SYSTEM RULE", system_prompt)
             self.assertIn("当前日期：2026-07-05", system_prompt)
-            self.assertIn("<group_transcript>", user_prompt)
+            self.assertIn("<conversation_transcript>", user_prompt)
             self.assertIn("<current_request>\n怎么修？", user_prompt)
 
     def test_at_is_removed_but_skill_command_is_retained(self):

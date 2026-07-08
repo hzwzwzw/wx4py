@@ -15,6 +15,7 @@ from .handler import KJFWDHandler
 from .history import HistoryStore
 from .llm import OpenAIChatClient
 from .prompt import PromptBuilder
+from .router import ConversationRouter
 from .search import BraveSearchClient, WebSearchTool
 
 logger = logging.getLogger(__name__)
@@ -37,11 +38,14 @@ def build_handler(config: BotConfig, history: HistoryStore) -> KJFWDHandler:
         bot_nicknames=config.group_nicknames,
         history=history,
         model=agent,
+        router=ConversationRouter(llm_client),
         prompt_builder=PromptBuilder(config.system_prompt_path, capabilities),
         max_messages=config.history.max_messages,
         max_characters=config.history.max_characters,
         trigger_dedupe_seconds=config.history.trigger_dedupe_seconds,
         queue_size_per_group=config.queue_size_per_group,
+        conversation_pool=config.conversation_pool,
+        show_conversation_id=config.debug.conversation_id_in_reply,
     )
 
 

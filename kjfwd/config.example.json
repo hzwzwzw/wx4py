@@ -39,6 +39,17 @@
     "retention_days": 30,
     "trigger_dedupe_seconds": 1.0
   },
+  "conversation_pool": {
+    "active_ttl_seconds": 1800,
+    "max_active": 5,
+    "global_fallback_seconds": 3600,
+    "global_fallback_max_messages": 80,
+    "low_information_recent_reply_seconds": 180
+  },
+  "debug": {
+    "conversation_id_in_reply": true,
+    "router_decision_log": true
+  },
   "system_prompt_path": "prompts/system.md",
   "skills_path": "skills",
   "queue_size_per_group": 5

@@ -15,6 +15,7 @@ from kjfwd.kjfwd_bot.handler import (
     raw_control_mentions_bot,
 )
 from kjfwd.kjfwd_bot.history import HistoryStore
+from kjfwd.kjfwd_bot.models import ConversationRoute
 from kjfwd.kjfwd_bot.prompt import PromptBuilder
 
 
@@ -44,6 +45,18 @@ class FakeModel:
         return "请先断电，再检查电源线。"
 
 
+class FakeRouter:
+    def __init__(self, routes=()):
+        self.routes = list(routes)
+        self.calls = []
+
+    def route(self, *, group_name, request, candidates, recent_messages):
+        self.calls.append((group_name, request, candidates, recent_messages))
+        if self.routes:
+            return self.routes.pop(0)
+        return ConversationRoute("create_new", title=request[:12] or "新会话")
+
+
 class BlockingModel:
     def __init__(self):
         self.started = threading.Event()
@@ -69,6 +82,7 @@ class HandlerTests(unittest.TestCase):
             history=self.store,
             model=self.model,
             prompt_builder=PromptBuilder(system, CapabilityRegistry([])),
+            router=FakeRouter(),
         )
         self.actions = []
         self.action_ready = threading.Event()
@@ -352,6 +366,62 @@ class HandlerTests(unittest.TestCase):
         self.assertTrue(force_search)
         self.assertIn("<current_request>\n某硬件型号参数", user_prompt)
         self.assertNotIn("<current_request>\n/search", user_prompt)
+
+    def test_router_can_route_trigger_to_existing_conversation(self):
+        now = time.time()
+        first = MessageEvent(
+            "客户群", "@柯基服务队\u2005 打印机脱机", now, "柯基服务队", True, FakeRaw((21, 1))
+        )
+        self.handler.handle(first)
+        deadline = time.time() + 2
+        while len(self.actions) < 1 and time.time() < deadline:
+            time.sleep(0.01)
+        first_conv = self.store.get_trigger(1)["reply_message_id"]
+        conversations = self.store.list_active_conversations("客户群", now=now + 1)
+        self.assertEqual(1, len(conversations))
+        conversation_id = conversations[0].id
+
+        self.handler.router = FakeRouter(
+            [ConversationRoute("use_existing", conversation_id=conversation_id)]
+        )
+        second = MessageEvent(
+            "客户群", "@柯基服务队\u2005 还是打印不了", now + 2, "柯基服务队", True, FakeRaw((21, 2))
+        )
+        self.handler.handle(second)
+        deadline = time.time() + 2
+        while len(self.actions) < 2 and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertEqual(2, len(self.model.calls))
+        self.assertIn("打印机脱机", self.model.calls[1][1])
+        self.assertIn("还是打印不了", self.model.calls[1][1])
+        self.assertIn(f"[conv: {conversation_id[:8]}]", self.actions[1].content)
+
+    def test_ambiguous_route_uses_global_history_without_polluting_existing_conversations(self):
+        now = time.time()
+        first = self.store.create_conversation("客户群", title="打印机脱机", now=now)
+        second = self.store.create_conversation("客户群", title="幻14清灰", now=now + 1)
+        self.store.record_group_message("客户群", "打印机之前显示脱机", now + 2, "g1")
+        self.store.record_assistant_message("客户群", "s", "取消脱机使用打印机。", now + 3, first.id)
+        self.store.record_group_message("客户群", "幻14可能涉及液金", now + 4, "g2")
+        self.store.record_assistant_message("客户群", "s", "先确认具体年份。", now + 5, second.id)
+
+        self.handler.router = FakeRouter([ConversationRoute("ambiguous", reason="too short")])
+        self.handler.handle(
+            MessageEvent("客户群", "@柯基服务队\u2005 还是不行", now + 6, "柯基服务队", True, FakeRaw((22, 1)))
+        )
+        deadline = time.time() + 2
+        while len(self.actions) < 1 and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertEqual(1, len(self.model.calls))
+        user_prompt = self.model.calls[0][1]
+        self.assertIn("<global_recent_transcript>", user_prompt)
+        self.assertIn("打印机之前显示脱机", user_prompt)
+        self.assertIn("幻14可能涉及液金", user_prompt)
+        self.assertIn("[conv: ambiguous]", self.actions[0].content)
+        active = self.store.list_active_conversations("客户群", now=now + 7)
+        self.assertEqual({first.id, second.id}, {item.id for item in active})
 
     def test_clear_discards_an_inflight_old_reply(self):
         blocking_model = BlockingModel()

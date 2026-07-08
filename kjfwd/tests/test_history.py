@@ -52,6 +52,34 @@ class HistoryStoreTests(unittest.TestCase):
         self.store.record_group_message("群", "future", 1006, "future")
         self.assertNotIn("future", [m.content for m in snapshot.messages])
 
+    def test_conversation_snapshot_only_contains_bound_messages(self):
+        first = self.store.create_conversation("群", title="打印机", now=1000)
+        second = self.store.create_conversation("群", title="清灰", now=1001)
+        m1, _ = self.store.record_group_message("群", "打印机脱机", 1002, "c1")
+        m2, _ = self.store.record_group_message("群", "幻14清灰", 1003, "c2")
+        m3, _ = self.store.record_group_message("群", "打印机还是不行", 1004, "c3")
+        self.store.bind_message_to_conversation(m1.id, first.id, trigger_at=1002)
+        self.store.bind_message_to_conversation(m2.id, second.id, trigger_at=1003)
+        m3 = self.store.bind_message_to_conversation(m3.id, first.id, trigger_at=1004)
+
+        snapshot = self.store.conversation_snapshot(m3, first.id, max_messages=10, max_characters=1000)
+        self.assertEqual(["打印机脱机", "打印机还是不行"], [m.content for m in snapshot.messages])
+        self.assertNotIn("幻14清灰", [m.content for m in snapshot.messages])
+
+    def test_ambiguous_snapshot_uses_global_history(self):
+        m1, _ = self.store.record_group_message("群", "打印机脱机", 1000, "a1")
+        self.store.record_group_message("群", "幻14清灰", 1001, "a2")
+        trigger, _ = self.store.record_group_message("群", "@bot 还是不行", 1002, "a3")
+        snapshot = self.store.ambiguous_snapshot(
+            trigger,
+            conversation_id="ambiguous",
+            global_seconds=3600,
+            global_max_messages=10,
+            max_characters=1000,
+        )
+        self.assertTrue(snapshot.ambiguous)
+        self.assertEqual(["打印机脱机", "幻14清灰", "@bot 还是不行"], [m.content for m in snapshot.global_messages])
+
 
 if __name__ == "__main__":
     unittest.main()
