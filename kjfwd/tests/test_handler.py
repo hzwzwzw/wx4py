@@ -184,6 +184,19 @@ class HandlerTests(unittest.TestCase):
         time.sleep(0.05)
         self.assertEqual([], self.model.calls)
 
+    def test_events_from_reply_only_group_are_ignored_by_handler(self):
+        event = MessageEvent(
+            group="机器人参考群",
+            content="这是什么意思",
+            timestamp=time.time(),
+            group_nickname="柯基服务队",
+            is_at_me=False,
+            raw=FakeRaw((30, 1)),
+        )
+        self.handler.handle(event)
+        time.sleep(0.05)
+        self.assertEqual([], self.model.calls)
+
     def test_all_messages_mode_replies_without_at(self):
         self.handler.listen_modes["客户群"] = "all_messages"
         event = MessageEvent(

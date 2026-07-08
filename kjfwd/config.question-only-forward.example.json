@@ -1,0 +1,72 @@
+{
+  "groups": [
+    {
+      "name": "答疑群一",
+      "bot_nickname": "柯基服务队",
+      "listen_mode": "question_only",
+      "reply_groups": ["机器人参考群"]
+    },
+    {
+      "name": "答疑群二",
+      "bot_nickname": "柯基服务队",
+      "listen_mode": "question_only",
+      "reply_groups": ["机器人参考群"]
+    },
+    {
+      "name": "答疑群三",
+      "bot_nickname": "柯基服务队",
+      "listen_mode": "question_only",
+      "reply_groups": ["机器人参考群"]
+    },
+    {
+      "name": "答疑群四",
+      "bot_nickname": "柯基服务队",
+      "listen_mode": "question_only",
+      "reply_groups": ["机器人参考群"]
+    }
+  ],
+  "llm": {
+    "api_key_env": "API_KEY",
+    "base_url_env": "BASE_URL",
+    "model_env": "MODEL",
+    "temperature": 0.3,
+    "max_tokens": 700,
+    "timeout_seconds": 60,
+    "retries": 2
+  },
+  "search": {
+    "enabled": true,
+    "api_key_env": "BRAVE_KEY",
+    "endpoint": "https://api.search.brave.com/res/v1/llm/context",
+    "timeout_seconds": 20,
+    "retries": 2,
+    "max_results": 5,
+    "max_context_tokens": 4096,
+    "max_snippets": 20,
+    "cache_seconds": 900,
+    "minimum_request_interval_seconds": 1.1,
+    "max_tool_rounds": 2
+  },
+  "history": {
+    "database_path": "data/kjfwd.db",
+    "idle_timeout_seconds": 1800,
+    "max_messages": 100,
+    "max_characters": 16000,
+    "retention_days": 30,
+    "trigger_dedupe_seconds": 1.0
+  },
+  "conversation_pool": {
+    "active_ttl_seconds": 1800,
+    "max_active": 5,
+    "global_fallback_seconds": 3600,
+    "global_fallback_max_messages": 80,
+    "low_information_recent_reply_seconds": 180
+  },
+  "debug": {
+    "conversation_id_in_reply": true,
+    "router_decision_log": true
+  },
+  "system_prompt_path": "prompts/system.md",
+  "skills_path": "skills",
+  "queue_size_per_group": 5
+}

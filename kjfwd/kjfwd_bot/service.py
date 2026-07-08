@@ -22,6 +22,17 @@ from .search import BraveSearchClient, WebSearchTool
 logger = logging.getLogger(__name__)
 
 
+def process_group_names(config: BotConfig) -> tuple[str, ...]:
+    names = list(config.group_names)
+    seen = set(names)
+    for targets in config.reply_groups.values():
+        for group_name in targets:
+            if group_name not in seen:
+                names.append(group_name)
+                seen.add(group_name)
+    return tuple(names)
+
+
 def build_handler(config: BotConfig, history: HistoryStore) -> KJFWDHandler:
     capabilities = CapabilityRegistry.from_skill_directory(config.skills_path)
     logger.info("已加载 skills: %s", ", ".join(capabilities.names) or "无")
@@ -61,7 +72,7 @@ def run(config_path: Path, env_path: Path) -> None:
     try:
         with WeChatClient(auto_connect=True) as wx:
             wx.process_groups(
-                config.group_names,
+                process_group_names(config),
                 [handler],
                 group_nicknames=config.group_nicknames,
                 block=True,

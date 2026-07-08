@@ -25,6 +25,10 @@ BRAVE_KEY=...
 
 当 `reply_groups` 中的目标群不是来源群时，回复前会自动加上 `[来源群：群名]`，方便真人判断问题来自哪里。
 
+`reply_groups` 中的机器人参考群不需要再写进 `groups`；启动时程序会自动把它们加入 wx4py 的群窗口管理，用于发送。handler 会忽略这些输出群的普通消息，避免参考群内容反向污染答疑群上下文。
+
+四个答疑群使用 `question_only` 并统一转发到一个机器人参考群的模板见 `config.question-only-forward.example.json`。
+
 
 ## Skills
 

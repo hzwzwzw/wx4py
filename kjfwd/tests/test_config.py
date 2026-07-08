@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from kjfwd.kjfwd_bot.config import load_config
+from kjfwd.kjfwd_bot.service import process_group_names
 
 
 class ConfigTests(unittest.TestCase):
@@ -43,6 +44,10 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual("all_messages", config.listen_modes["全量群"])
             self.assertEqual(("机器人参考群",), config.reply_groups["答疑群"])
             self.assertEqual(("参考一", "参考二"), config.reply_groups["全量群"])
+            self.assertEqual(
+                ("答疑群", "全量群", "机器人参考群", "参考一", "参考二"),
+                process_group_names(config),
+            )
 
     def test_invalid_listen_mode_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

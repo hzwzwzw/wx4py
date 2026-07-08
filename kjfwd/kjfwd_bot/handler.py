@@ -196,6 +196,8 @@ class KJFWDHandler(MessageHandler):
             thread.start()
 
     def handle(self, event: MessageEvent):
+        if event.group not in self.groups:
+            return None
         source_key = event_source_key(event)
         message, _inserted = self.history.record_group_message(
             event.group, event.content, float(event.timestamp), source_key
