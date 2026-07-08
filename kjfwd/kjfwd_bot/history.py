@@ -137,6 +137,8 @@ class HistoryStore:
     ) -> StoredMessage:
         observed_at = time.time() if observed_at is None else observed_at
         with self._lock:
+            if conversation_id:
+                self._ensure_conversation_group(conversation_id, group_name)
             cursor = self._conn.execute(
                 "INSERT INTO messages(group_name, role, content, observed_at, session_id, conversation_id) "
                 "VALUES (?, 'assistant', ?, ?, ?, ?)",
@@ -231,6 +233,7 @@ class HistoryStore:
             row = self._conn.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
             if row is None:
                 raise KeyError(message_id)
+            self._ensure_conversation_group(conversation_id, str(row["group_name"]))
             self._conn.execute(
                 "UPDATE messages SET conversation_id=? WHERE id=?",
                 (conversation_id, message_id),
@@ -343,6 +346,8 @@ class HistoryStore:
         max_characters: int,
     ) -> ContextSnapshot:
         with self._lock:
+            self._ensure_conversation_group(conversation_id, trigger_message.group_name)
+        with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM messages WHERE conversation_id=? AND id<=? "
                 "ORDER BY id DESC LIMIT ?",
@@ -359,6 +364,9 @@ class HistoryStore:
         global_max_messages: int,
         max_characters: int,
     ) -> ContextSnapshot:
+        if conversation_id:
+            with self._lock:
+                self._ensure_conversation_group(conversation_id, trigger_message.group_name)
         cutoff = trigger_message.observed_at - global_seconds
         with self._lock:
             rows = self._conn.execute(
@@ -426,6 +434,17 @@ class HistoryStore:
                 "UPDATE conversations SET updated_at=?, last_trigger_at=COALESCE(?, last_trigger_at) "
                 "WHERE id=?",
                 (observed_at, last_trigger_at, conversation_id),
+            )
+
+    def _ensure_conversation_group(self, conversation_id: str, group_name: str) -> None:
+        row = self._conn.execute(
+            "SELECT group_name FROM conversations WHERE id=?", (conversation_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(conversation_id)
+        if str(row["group_name"]) != group_name:
+            raise ValueError(
+                f"conversation {conversation_id} belongs to group {row['group_name']}, not {group_name}"
             )
 
     def prune(self, retention_days: int, now: Optional[float] = None) -> int:

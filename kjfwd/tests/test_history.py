@@ -70,15 +70,40 @@ class HistoryStoreTests(unittest.TestCase):
         m1, _ = self.store.record_group_message("群", "打印机脱机", 1000, "a1")
         self.store.record_group_message("群", "幻14清灰", 1001, "a2")
         trigger, _ = self.store.record_group_message("群", "@bot 还是不行", 1002, "a3")
+        ambiguous = self.store.create_conversation("群", title="未判定追问", now=1002, status="ambiguous")
         snapshot = self.store.ambiguous_snapshot(
             trigger,
-            conversation_id="ambiguous",
+            conversation_id=ambiguous.id,
             global_seconds=3600,
             global_max_messages=10,
             max_characters=1000,
         )
         self.assertTrue(snapshot.ambiguous)
         self.assertEqual(["打印机脱机", "幻14清灰", "@bot 还是不行"], [m.content for m in snapshot.global_messages])
+
+    def test_conversation_operations_reject_cross_group_binding(self):
+        first_group_conversation = self.store.create_conversation("一群", title="打印机", now=1000)
+        other_message, _ = self.store.record_group_message("二群", "@bot 还是不行", 1001, "cross")
+
+        with self.assertRaises(ValueError):
+            self.store.bind_message_to_conversation(other_message.id, first_group_conversation.id, trigger_at=1001)
+
+        with self.assertRaises(ValueError):
+            self.store.record_assistant_message(
+                "二群",
+                other_message.session_id,
+                "回复",
+                1002,
+                first_group_conversation.id,
+            )
+
+        with self.assertRaises(ValueError):
+            self.store.conversation_snapshot(
+                other_message,
+                first_group_conversation.id,
+                max_messages=10,
+                max_characters=1000,
+            )
 
 
 if __name__ == "__main__":

@@ -77,8 +77,8 @@ class HandlerTests(unittest.TestCase):
         self.store = HistoryStore(root / "history.db")
         self.model = FakeModel()
         self.handler = KJFWDHandler(
-            groups=("客户群",),
-            bot_nicknames={"客户群": "柯基服务队"},
+            groups=("客户群", "二群"),
+            bot_nicknames={"客户群": "柯基服务队", "二群": "柯基服务队"},
             history=self.store,
             model=self.model,
             prompt_builder=PromptBuilder(system, CapabilityRegistry([])),
@@ -422,6 +422,46 @@ class HandlerTests(unittest.TestCase):
         self.assertIn("[conv: ambiguous]", self.actions[0].content)
         active = self.store.list_active_conversations("客户群", now=now + 7)
         self.assertEqual({first.id, second.id}, {item.id for item in active})
+
+    def test_low_information_followup_does_not_cross_group_boundaries(self):
+        now = time.time()
+        self.handler.handle(
+            MessageEvent(
+                "客户群",
+                "@柯基服务队\u2005 打印机脱机",
+                now,
+                "柯基服务队",
+                True,
+                FakeRaw((23, 1)),
+            )
+        )
+        deadline = time.time() + 2
+        while len(self.actions) < 1 and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.handler.handle(
+            MessageEvent(
+                "二群",
+                "@柯基服务队\u2005 还是不行",
+                now + 1,
+                "柯基服务队",
+                True,
+                FakeRaw((23, 2)),
+            )
+        )
+        deadline = time.time() + 2
+        while len(self.actions) < 2 and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertEqual(2, len(self.model.calls))
+        second_prompt = self.model.calls[1][1]
+        self.assertIn("还是不行", second_prompt)
+        self.assertNotIn("打印机脱机", second_prompt)
+        first_group = self.store.list_active_conversations("客户群", now=now + 2)
+        second_group = self.store.list_active_conversations("二群", now=now + 2)
+        self.assertEqual(1, len(first_group))
+        self.assertEqual(1, len(second_group))
+        self.assertNotEqual(first_group[0].id, second_group[0].id)
 
     def test_clear_discards_an_inflight_old_reply(self):
         blocking_model = BlockingModel()
