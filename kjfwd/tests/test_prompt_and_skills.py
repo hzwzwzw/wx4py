@@ -38,8 +38,8 @@ class PromptAndSkillTests(unittest.TestCase):
         rendered = registry.render(names)
         self.assertIn("skill name=\"neko\"", rendered)
         self.assertIn("必须优先采用", rendered)
-        self.assertIn("整段回复都要使用明显、自然的猫娘语气", rendered)
-        self.assertIn("不要只在句尾偶尔加一个“喵”", rendered)
+        self.assertIn("强烈体现猫娘口吻", rendered)
+        self.assertIn("语气词、标点符号和颜文字", rendered)
 
     def test_prompt_separates_untrusted_history_from_current_request(self):
         with tempfile.TemporaryDirectory() as directory:
