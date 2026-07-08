@@ -18,6 +18,7 @@ from .llm import ChatModel
 from .models import ConversationRoute, ReplyJob
 from .prompt import PromptBuilder, explicit_skill_names, strip_at
 from .config import ConversationPoolConfig
+from .classifier import KeywordQuestionClassifier, MessageClassifier
 from .router import AlwaysNewRouter, Router, is_low_information_followup, title_from_request
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,10 @@ class KJFWDHandler(MessageHandler):
         history: HistoryStore,
         model: ChatModel,
         prompt_builder: PromptBuilder,
+        listen_modes: Optional[Dict[str, str]] = None,
+        reply_groups: Optional[Dict[str, Tuple[str, ...]]] = None,
         router: Optional[Router] = None,
+        classifier: Optional[MessageClassifier] = None,
         max_messages: int = 100,
         max_characters: int = 16000,
         trigger_dedupe_seconds: float = 1.0,
@@ -156,9 +160,16 @@ class KJFWDHandler(MessageHandler):
     ):
         self.groups = groups
         self.bot_nicknames = dict(bot_nicknames)
+        self.listen_modes = {name: "mention_only" for name in groups}
+        if listen_modes:
+            self.listen_modes.update(listen_modes)
+        self.reply_groups = {name: (name,) for name in groups}
+        if reply_groups:
+            self.reply_groups.update({name: tuple(targets) for name, targets in reply_groups.items()})
         self.history = history
         self.model = model
         self.router = router or AlwaysNewRouter()
+        self.classifier = classifier or KeywordQuestionClassifier()
         self.prompt_builder = prompt_builder
         self.max_messages = max_messages
         self.max_characters = max_characters
@@ -195,7 +206,9 @@ class KJFWDHandler(MessageHandler):
             is_at_me = raw_control_mentions_bot(event.raw, nickname)
             if is_at_me:
                 logger.info("行内 @ UIA 回退命中：group=%s", event.group)
-        if not is_at_me:
+        request = strip_at(event.content, nickname) if is_at_me else str(event.content or "").strip()
+        mode = self.listen_modes.get(event.group, "mention_only")
+        if not self._should_trigger(event.group, mode, is_at_me, request):
             return None
 
         key = trigger_key(event, source_key)
@@ -211,14 +224,19 @@ class KJFWDHandler(MessageHandler):
             logger.info("忽略重复 @：group=%s trigger_id=%s status=%s", event.group, claim.trigger_id, claim.status)
             return None
 
-        request = strip_at(event.content, nickname)
         if not request:
             self.history.mark_trigger_failed(claim.trigger_id, "empty_request")
             return None
 
         reset_match = RESET_COMMAND_RE.fullmatch(request)
         if reset_match:
-            return self._handle_reset(event.group, message, claim.trigger_id, reset_match.group(1))
+            return self._handle_reset(
+                event.group,
+                message,
+                claim.trigger_id,
+                reset_match.group(1),
+                self._reply_groups_for(event.group),
+            )
 
         if is_help_request(request):
             conversation = self.history.create_conversation(
@@ -233,6 +251,7 @@ class KJFWDHandler(MessageHandler):
                 claim.trigger_id,
                 self._help_text(),
                 conversation_id=conversation.id,
+                reply_groups=self._reply_groups_for(event.group),
             )
 
         force_search, request = self._parse_search_command(request)
@@ -249,6 +268,7 @@ class KJFWDHandler(MessageHandler):
                 claim.trigger_id,
                 "请在 /search 后写明需要查询的问题。",
                 conversation_id=conversation.id,
+                reply_groups=self._reply_groups_for(event.group),
             )
 
         with self._context_lock:
@@ -262,6 +282,7 @@ class KJFWDHandler(MessageHandler):
             explicit_skill_names(request),
             generation,
             force_search,
+            self._reply_groups_for(event.group),
         )
         self._enqueue_job(event.group, job)
         return None
@@ -272,6 +293,7 @@ class KJFWDHandler(MessageHandler):
         message,
         trigger_id: int,
         following_request: Optional[str],
+        reply_groups: Tuple[str, ...],
     ):
         with self._context_lock:
             self._context_generations[group_name] += 1
@@ -292,6 +314,7 @@ class KJFWDHandler(MessageHandler):
                     trigger_id,
                     "已清除此前的聊天上下文，我们开始一次新对话。",
                     conversation_id=conversation.id,
+                    reply_groups=reply_groups,
                 )
 
             if is_help_request(request):
@@ -301,6 +324,7 @@ class KJFWDHandler(MessageHandler):
                     trigger_id,
                     self._help_text(),
                     conversation_id=conversation.id,
+                    reply_groups=reply_groups,
                 )
 
             force_search, request = self._parse_search_command(request)
@@ -311,6 +335,7 @@ class KJFWDHandler(MessageHandler):
                     trigger_id,
                     "请在 /search 后写明需要查询的问题。",
                     conversation_id=conversation.id,
+                    reply_groups=reply_groups,
                 )
 
             snapshot = self.history.conversation_snapshot(
@@ -326,6 +351,7 @@ class KJFWDHandler(MessageHandler):
                 explicit_skill_names(request),
                 generation,
                 force_search,
+                reply_groups,
             )
         self._enqueue_job(group_name, job)
         return None
@@ -422,6 +448,7 @@ class KJFWDHandler(MessageHandler):
         trigger_id: int,
         content: str,
         conversation_id: Optional[str] = None,
+        reply_groups: Tuple[str, ...] = (),
     ):
         try:
             reply = self._finalize_reply(content, conversation_id)
@@ -430,7 +457,13 @@ class KJFWDHandler(MessageHandler):
             )
             if self._emit_action is None:
                 raise RuntimeError("消息发送器尚未初始化")
-            self._emit_action(ReplyAction(group=group_name, content=reply))
+            for target_group in reply_groups or self._reply_groups_for(group_name):
+                self._emit_action(
+                    ReplyAction(
+                        group=target_group,
+                        content=self._outbound_reply(group_name, target_group, reply),
+                    )
+                )
             self.history.mark_trigger_sent(trigger_id, stored.id)
         except Exception as exc:
             self.history.mark_trigger_failed(trigger_id, str(exc))
@@ -481,7 +514,13 @@ class KJFWDHandler(MessageHandler):
                     )
                     if self._emit_action is None:
                         raise RuntimeError("消息发送器尚未初始化")
-                    self._emit_action(ReplyAction(group=group_name, content=reply))
+                    for target_group in job.reply_groups or self._reply_groups_for(group_name):
+                        self._emit_action(
+                            ReplyAction(
+                                group=target_group,
+                                content=self._outbound_reply(group_name, target_group, reply),
+                            )
+                        )
                     # sent 表示已经交给 wx4py 的串行发送队列，不代表微信提供了送达回执。
                     self.history.mark_trigger_sent(job.trigger_id, stored.id)
             except Exception as exc:
@@ -502,6 +541,46 @@ class KJFWDHandler(MessageHandler):
             if not text.startswith("[conv:"):
                 text = f"[conv: {label}]\n{text}"
         return append_reference_notice(text)
+
+    def _should_trigger(self, group_name: str, mode: str, is_at_me: bool, request: str) -> bool:
+        if is_at_me:
+            if mode != "question_only":
+                return True
+            if self._is_command_request(request):
+                return True
+            return self.classifier.should_reply(group_name=group_name, content=request)
+        if mode == "mention_only":
+            return False
+        if mode == "all_messages":
+            return bool(str(request or "").strip())
+        if mode == "question_only":
+            if self._is_command_request(request):
+                return True
+            return self.classifier.should_reply(group_name=group_name, content=request)
+        return False
+
+    @staticmethod
+    def _is_command_request(request: str) -> bool:
+        text = str(request or "").strip()
+        return bool(
+            RESET_COMMAND_RE.fullmatch(text)
+            or HELP_COMMAND_RE.fullmatch(text)
+            or SEARCH_COMMAND_RE.fullmatch(text)
+            or is_help_request(text)
+        )
+
+    def _reply_groups_for(self, group_name: str) -> Tuple[str, ...]:
+        targets = tuple(value for value in self.reply_groups.get(group_name, (group_name,)) if value)
+        return targets or (group_name,)
+
+    @staticmethod
+    def _outbound_reply(source_group: str, target_group: str, reply: str) -> str:
+        if target_group == source_group:
+            return reply
+        prefix = f"[来源群：{source_group}]"
+        if str(reply or "").startswith(prefix):
+            return reply
+        return prefix + "\n" + reply
 
     def stop(self) -> None:
         self._stop_event.set()

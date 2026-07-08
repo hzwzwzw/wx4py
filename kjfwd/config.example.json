@@ -2,11 +2,21 @@
   "groups": [
     {
       "name": "客户群一",
-      "bot_nickname": "柯基服务队"
+      "bot_nickname": "柯基服务队",
+      "listen_mode": "mention_only",
+      "reply_groups": ["客户群一"]
     },
     {
       "name": "客户群二",
-      "bot_nickname": "柯基服务队"
+      "bot_nickname": "柯基服务队",
+      "listen_mode": "question_only",
+      "reply_groups": ["机器人参考群"]
+    },
+    {
+      "name": "客户群三",
+      "bot_nickname": "柯基服务队",
+      "listen_mode": "all_messages",
+      "reply_groups": ["机器人参考群", "另一个机器人参考群"]
     }
   ],
   "llm": {

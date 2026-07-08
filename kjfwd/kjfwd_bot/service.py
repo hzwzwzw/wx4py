@@ -10,6 +10,7 @@ except ImportError:
 
 from .capabilities import CapabilityRegistry
 from .agent import ToolCallingAgent
+from .classifier import LLMQuestionClassifier
 from .config import BotConfig, load_config
 from .handler import KJFWDHandler
 from .history import HistoryStore
@@ -36,9 +37,12 @@ def build_handler(config: BotConfig, history: HistoryStore) -> KJFWDHandler:
     return KJFWDHandler(
         groups=config.group_names,
         bot_nicknames=config.group_nicknames,
+        listen_modes=config.listen_modes,
+        reply_groups=config.reply_groups,
         history=history,
         model=agent,
         router=ConversationRouter(llm_client),
+        classifier=LLMQuestionClassifier(llm_client),
         prompt_builder=PromptBuilder(config.system_prompt_path, capabilities),
         max_messages=config.history.max_messages,
         max_characters=config.history.max_characters,

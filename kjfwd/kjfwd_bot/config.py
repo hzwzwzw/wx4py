@@ -35,6 +35,8 @@ def _env_value(primary: str, fallback: Optional[str] = None) -> str:
 class GroupConfig:
     name: str
     bot_nickname: str
+    listen_mode: str = "mention_only"
+    reply_groups: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,14 @@ class BotConfig:
     def group_nicknames(self) -> Dict[str, str]:
         return {group.name: group.bot_nickname for group in self.groups}
 
+    @property
+    def listen_modes(self) -> Dict[str, str]:
+        return {group.name: group.listen_mode for group in self.groups}
+
+    @property
+    def reply_groups(self) -> Dict[str, Tuple[str, ...]]:
+        return {group.name: group.reply_groups or (group.name,) for group in self.groups}
+
 
 def load_config(
     config_path: Path,
@@ -125,17 +135,16 @@ def load_config(
     data = json.loads(config_path.read_text(encoding="utf-8-sig"))
     base_dir = config_path.parent
 
-    groups = tuple(
-        GroupConfig(
-            name=str(item.get("name", "")).strip(),
-            bot_nickname=str(item.get("bot_nickname", "")).strip(),
-        )
-        for item in data.get("groups", [])
-    )
+    group_items = data.get("groups", [])
+    groups = tuple(_parse_group_config(item) for item in group_items)
     if not groups or any(not group.name or not group.bot_nickname for group in groups):
         raise ValueError("groups 必须包含非空的 name 和 bot_nickname")
     if len({group.name for group in groups}) != len(groups):
         raise ValueError("groups 中不能有重复群名")
+    valid_modes = {"mention_only", "all_messages", "question_only"}
+    invalid_modes = sorted({group.listen_mode for group in groups} - valid_modes)
+    if invalid_modes:
+        raise ValueError(f"未知监听模式：{', '.join(invalid_modes)}")
 
     llm_data = data.get("llm", {})
     api_key = _env_value(str(llm_data.get("api_key_env", "API_KEY")))
@@ -242,3 +251,26 @@ def load_config(
 def _resolve_path(base_dir: Path, value: object) -> Path:
     path = Path(str(value))
     return path if path.is_absolute() else (base_dir / path).resolve()
+
+
+def _parse_group_config(item: object) -> GroupConfig:
+    if not isinstance(item, dict):
+        raise ValueError("groups 中的每一项必须是对象")
+    name = str(item.get("name", "")).strip()
+    bot_nickname = str(item.get("bot_nickname", "")).strip()
+    listen_mode = str(item.get("listen_mode", "mention_only")).strip() or "mention_only"
+    raw_reply_groups = item.get("reply_groups")
+    if raw_reply_groups is None:
+        reply_groups = (name,) if name else ()
+    elif isinstance(raw_reply_groups, str):
+        reply_groups = (raw_reply_groups.strip(),) if raw_reply_groups.strip() else ()
+    else:
+        reply_groups = tuple(str(value).strip() for value in raw_reply_groups if str(value).strip())
+    if not reply_groups and name:
+        reply_groups = (name,)
+    return GroupConfig(
+        name=name,
+        bot_nickname=bot_nickname,
+        listen_mode=listen_mode,
+        reply_groups=reply_groups,
+    )

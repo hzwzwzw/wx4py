@@ -57,6 +57,18 @@ class FakeRouter:
         return ConversationRoute("create_new", title=request[:12] or "新会话")
 
 
+class FakeClassifier:
+    def __init__(self, decisions=()):
+        self.decisions = list(decisions)
+        self.calls = []
+
+    def should_reply(self, *, group_name, content):
+        self.calls.append((group_name, content))
+        if self.decisions:
+            return self.decisions.pop(0)
+        return False
+
+
 class BlockingModel:
     def __init__(self):
         self.started = threading.Event()
@@ -171,6 +183,57 @@ class HandlerTests(unittest.TestCase):
         self.handler.handle(event)
         time.sleep(0.05)
         self.assertEqual([], self.model.calls)
+
+    def test_all_messages_mode_replies_without_at(self):
+        self.handler.listen_modes["客户群"] = "all_messages"
+        event = MessageEvent(
+            group="客户群",
+            content="电脑开不了机",
+            timestamp=time.time(),
+            group_nickname="柯基服务队",
+            is_at_me=False,
+            raw=FakeRaw((31, 1)),
+        )
+        self.handler.handle(event)
+        self.assertTrue(self.action_ready.wait(2))
+        self.assertEqual(1, len(self.model.calls))
+        self.assertIn("<current_request>\n电脑开不了机", self.model.calls[0][1])
+
+    def test_question_only_mode_uses_classifier_before_replying(self):
+        classifier = FakeClassifier([False, True])
+        self.handler.classifier = classifier
+        self.handler.listen_modes["客户群"] = "question_only"
+
+        self.handler.handle(
+            MessageEvent("客户群", "谢谢", time.time(), "柯基服务队", False, FakeRaw((32, 1)))
+        )
+        time.sleep(0.05)
+        self.assertEqual([], self.model.calls)
+
+        self.handler.handle(
+            MessageEvent("客户群", "电脑蓝屏怎么办", time.time() + 1, "柯基服务队", False, FakeRaw((32, 2)))
+        )
+        self.assertTrue(self.action_ready.wait(2))
+        self.assertEqual(2, len(classifier.calls))
+        self.assertEqual(1, len(self.model.calls))
+        self.assertIn("电脑蓝屏怎么办", self.model.calls[0][1])
+
+    def test_split_reply_groups_emit_to_configured_robot_group(self):
+        self.handler.reply_groups["客户群"] = ("机器人参考群",)
+        self.handler.handle(
+            MessageEvent(
+                "客户群",
+                "@柯基服务队\u2005 电脑蓝屏",
+                time.time(),
+                "柯基服务队",
+                True,
+                FakeRaw((33, 1)),
+            )
+        )
+        self.assertTrue(self.action_ready.wait(2))
+        self.assertEqual("机器人参考群", self.actions[0].group)
+        self.assertIn("[来源群：客户群]", self.actions[0].content)
+        self.assertIn("请先断电，再检查电源线。", self.actions[0].content)
 
     def test_inline_at_in_raw_child_controls_triggers_reply(self):
         raw = FakeControl(

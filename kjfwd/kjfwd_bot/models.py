@@ -43,6 +43,7 @@ class ReplyJob:
     explicit_skills: Tuple[str, ...]
     context_generation: int
     force_search: bool = False
+    reply_groups: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
