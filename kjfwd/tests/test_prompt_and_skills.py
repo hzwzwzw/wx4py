@@ -46,6 +46,32 @@ class PromptAndSkillTests(unittest.TestCase):
             self.assertIn("<conversation_transcript>", user_prompt)
             self.assertIn("<current_request>\n怎么修？", user_prompt)
 
+    def test_ambiguous_prompt_warns_against_same_speaker_attribution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            system = root / "system.md"
+            system.write_text("SYSTEM RULE", encoding="utf-8")
+            builder = PromptBuilder(system, CapabilityRegistry([]))
+            messages = (
+                StoredMessage(1, "群", "group", "缩了要怎么办", 1000, "session"),
+                StoredMessage(2, "群", "assistant", "建议先确认质保和 BIOS。", 1001, "session"),
+                StoredMessage(3, "群", "group", "Win11 报错，显卡不识别", 1002, "session"),
+            )
+            snapshot = ContextSnapshot(
+                "群",
+                "session",
+                3,
+                (),
+                conversation_id="ambiguous",
+                global_messages=messages,
+                ambiguous=True,
+            )
+            _system_prompt, user_prompt = builder.build(snapshot, "啥意思", ())
+            self.assertIn("<global_recent_transcript>", user_prompt)
+            self.assertIn("不要假设不同群消息来自同一个人", user_prompt)
+            self.assertIn("不要说“你之前问了", user_prompt)
+            self.assertIn("如果这句是在接前面关于", user_prompt)
+
     def test_at_is_removed_but_skill_command_is_retained(self):
         cleaned = strip_at("@柯基服务队\u2005 /硬盘 检查一下", "柯基服务队")
         self.assertEqual("/硬盘 检查一下", cleaned)
