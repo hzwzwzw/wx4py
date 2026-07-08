@@ -63,6 +63,12 @@ class ConversationRouter:
         )
         user = self._build_user_prompt(group_name, request, candidates, recent_messages)
         try:
+            logger.info(
+                "开始 LLM 会话路由：group=%s candidates=%s request=%s",
+                group_name,
+                len(candidates),
+                _excerpt(request),
+            )
             message = self.client.chat(
                 [{"role": "system", "content": system}, {"role": "user", "content": user}],
                 thinking=False,
@@ -76,20 +82,43 @@ class ConversationRouter:
         if action == "use_existing":
             conversation_id = str(payload.get("conversation_id") or "").strip()
             if conversation_id in {item.id for item in candidates}:
-                return ConversationRoute(
+                route = ConversationRoute(
                     "use_existing",
                     conversation_id=conversation_id,
                     reason=str(payload.get("reason") or ""),
                 )
+                logger.info(
+                    "LLM 会话路由完成：group=%s action=%s conversation=%s reason=%s",
+                    group_name,
+                    route.action,
+                    route.conversation_id,
+                    route.reason,
+                )
+                return route
             return ConversationRoute("ambiguous", reason="router selected unknown conversation")
         if action == "create_new":
-            return ConversationRoute(
+            route = ConversationRoute(
                 "create_new",
                 title=str(payload.get("title") or title_from_request(request))[:80],
                 reason=str(payload.get("reason") or ""),
             )
+            logger.info(
+                "LLM 会话路由完成：group=%s action=%s title=%s reason=%s",
+                group_name,
+                route.action,
+                route.title,
+                route.reason,
+            )
+            return route
         if action == "ambiguous":
-            return ConversationRoute("ambiguous", reason=str(payload.get("reason") or ""))
+            route = ConversationRoute("ambiguous", reason=str(payload.get("reason") or ""))
+            logger.info(
+                "LLM 会话路由完成：group=%s action=%s reason=%s",
+                group_name,
+                route.action,
+                route.reason,
+            )
+            return route
         return ConversationRoute("ambiguous", reason=f"invalid action: {action}")
 
     @staticmethod
@@ -154,3 +183,10 @@ def parse_json_object(text: str) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("router output is not an object")
     return payload
+
+
+def _excerpt(value: str, limit: int = 120) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"

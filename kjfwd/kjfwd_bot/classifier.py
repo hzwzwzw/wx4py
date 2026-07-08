@@ -36,12 +36,15 @@ class LLMQuestionClassifier:
             '请只输出 JSON：{"should_reply":true} 或 {"should_reply":false}'
         )
         try:
+            logger.info("开始 LLM 问题分类：group=%s message=%s", group_name, _excerpt(text))
             message = self.client.chat(
                 [{"role": "system", "content": system}, {"role": "user", "content": user}],
                 thinking=False,
             )
             payload = parse_json_object(str(message.get("content") or ""))
-            return bool(payload.get("should_reply"))
+            decision = bool(payload.get("should_reply"))
+            logger.info("LLM 问题分类完成：group=%s should_reply=%s message=%s", group_name, decision, _excerpt(text))
+            return decision
         except Exception as exc:
             logger.warning("问题分类失败，默认不触发回复：group=%s error=%s", group_name, exc)
             return False
@@ -70,3 +73,10 @@ def parse_json_object(text: str) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("classifier output is not an object")
     return payload
+
+
+def _excerpt(value: str, limit: int = 120) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 from urllib.parse import urlparse
@@ -49,6 +50,8 @@ OFFICIAL_DOMAIN_SUFFIXES = (
     "samsung.com",
 )
 
+logger = logging.getLogger(__name__)
+
 
 class ToolCallingAgent:
     def __init__(
@@ -67,6 +70,12 @@ class ToolCallingAgent:
     def complete(
         self, system_prompt: str, user_prompt: str, *, force_search: bool = False
     ) -> str:
+        logger.info(
+            "开始 LLM 回答：force_search=%s tools=%s request=%s",
+            force_search,
+            ",".join(self.tools) or "none",
+            _request_excerpt(user_prompt),
+        )
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -78,12 +87,19 @@ class ToolCallingAgent:
             if force_search:
                 raise RuntimeError("联网搜索未启用")
             text = self.client.complete(system_prompt, user_prompt)
+            logger.info("LLM 回答完成：tools=none chars=%s", len(text))
             return self._finalize(
                 text, system_prompt, user_prompt, sources, grounding_contents
             )
 
         for round_index in range(self.max_tool_rounds):
             require_search = force_search or should_require_search(user_prompt)
+            logger.info(
+                "LLM 工具轮：round=%s require_search=%s force_search=%s",
+                round_index + 1,
+                require_search,
+                force_search,
+            )
             if require_search and round_index == 0:
                 choice: Any = {
                     "type": "function",
@@ -100,12 +116,19 @@ class ToolCallingAgent:
                 text = str(assistant.get("content") or "").strip()
                 if not text:
                     raise RuntimeError("LLM 未返回回复或工具调用")
+                logger.info("LLM 回答完成：tool_calls=0 chars=%s", len(text))
                 return self._finalize(
                     text, system_prompt, user_prompt, sources, grounding_contents
                 )
 
             messages.append(self._assistant_tool_message(assistant))
             for call in tool_calls:
+                function = call.get("function") or {}
+                logger.info(
+                    "执行 LLM 工具调用：name=%s arguments=%s",
+                    function.get("name"),
+                    str(function.get("arguments") or "")[:300],
+                )
                 tool_message, tool_sources = self._execute_tool_call(call)
                 messages.append(tool_message)
                 sources.extend(tool_sources)
@@ -117,6 +140,7 @@ class ToolCallingAgent:
         text = str(final.get("content") or "").strip()
         if not text:
             raise RuntimeError("工具调用结束后 LLM 未返回最终回复")
+        logger.info("LLM 工具调用后回答完成：sources=%s chars=%s", len(sources), len(text))
         return self._finalize(text, system_prompt, user_prompt, sources, grounding_contents)
 
     @staticmethod
@@ -307,3 +331,12 @@ def truncate_at_sentence(text: str, limit: int) -> str:
     if cut < int(limit * 0.6):
         cut = limit
     return head[: cut + 1].rstrip()
+
+
+def _request_excerpt(user_prompt: str, limit: int = 120) -> str:
+    match = CURRENT_REQUEST_RE.search(user_prompt)
+    request = match.group(1) if match else str(user_prompt or "")
+    request = " ".join(request.split())
+    if len(request) <= limit:
+        return request
+    return request[: limit - 1] + "…"

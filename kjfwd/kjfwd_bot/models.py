@@ -44,6 +44,7 @@ class ReplyJob:
     context_generation: int
     force_search: bool = False
     reply_groups: Tuple[str, ...] = ()
+    original_message: str = ""
 
 
 @dataclass(frozen=True)

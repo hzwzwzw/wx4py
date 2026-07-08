@@ -254,6 +254,7 @@ class KJFWDHandler(MessageHandler):
                 self._help_text(),
                 conversation_id=conversation.id,
                 reply_groups=self._reply_groups_for(event.group),
+                original_message=request,
             )
 
         force_search, request = self._parse_search_command(request)
@@ -271,6 +272,7 @@ class KJFWDHandler(MessageHandler):
                 "请在 /search 后写明需要查询的问题。",
                 conversation_id=conversation.id,
                 reply_groups=self._reply_groups_for(event.group),
+                original_message="/search",
             )
 
         with self._context_lock:
@@ -285,6 +287,7 @@ class KJFWDHandler(MessageHandler):
             generation,
             force_search,
             self._reply_groups_for(event.group),
+            request,
         )
         self._enqueue_job(event.group, job)
         return None
@@ -317,6 +320,7 @@ class KJFWDHandler(MessageHandler):
                     "已清除此前的聊天上下文，我们开始一次新对话。",
                     conversation_id=conversation.id,
                     reply_groups=reply_groups,
+                    original_message="/clear",
                 )
 
             if is_help_request(request):
@@ -327,6 +331,7 @@ class KJFWDHandler(MessageHandler):
                     self._help_text(),
                     conversation_id=conversation.id,
                     reply_groups=reply_groups,
+                    original_message=request,
                 )
 
             force_search, request = self._parse_search_command(request)
@@ -338,6 +343,7 @@ class KJFWDHandler(MessageHandler):
                     "请在 /search 后写明需要查询的问题。",
                     conversation_id=conversation.id,
                     reply_groups=reply_groups,
+                    original_message="/search",
                 )
 
             snapshot = self.history.conversation_snapshot(
@@ -354,6 +360,7 @@ class KJFWDHandler(MessageHandler):
                 generation,
                 force_search,
                 reply_groups,
+                request,
             )
         self._enqueue_job(group_name, job)
         return None
@@ -451,6 +458,7 @@ class KJFWDHandler(MessageHandler):
         content: str,
         conversation_id: Optional[str] = None,
         reply_groups: Tuple[str, ...] = (),
+        original_message: str = "",
     ):
         try:
             reply = self._finalize_reply(content, conversation_id)
@@ -463,7 +471,9 @@ class KJFWDHandler(MessageHandler):
                 self._emit_action(
                     ReplyAction(
                         group=target_group,
-                        content=self._outbound_reply(group_name, target_group, reply),
+                        content=self._outbound_reply(
+                            group_name, target_group, reply, original_message
+                        ),
                     )
                 )
             self.history.mark_trigger_sent(trigger_id, stored.id)
@@ -498,6 +508,16 @@ class KJFWDHandler(MessageHandler):
                 system_prompt, user_prompt = self.prompt_builder.build(
                     job.snapshot, job.clean_request, job.explicit_skills
                 )
+                logger.info(
+                    "开始生成回复：group=%s trigger_id=%s conversation=%s ambiguous=%s force_search=%s reply_groups=%s request=%s",
+                    group_name,
+                    job.trigger_id,
+                    job.snapshot.conversation_id,
+                    job.snapshot.ambiguous,
+                    job.force_search,
+                    ",".join(job.reply_groups or self._reply_groups_for(group_name)),
+                    _log_excerpt(job.clean_request),
+                )
                 reply = self.model.complete(
                     system_prompt, user_prompt, force_search=job.force_search
                 ).strip()
@@ -520,11 +540,21 @@ class KJFWDHandler(MessageHandler):
                         self._emit_action(
                             ReplyAction(
                                 group=target_group,
-                                content=self._outbound_reply(group_name, target_group, reply),
+                                content=self._outbound_reply(
+                                    group_name, target_group, reply, job.original_message
+                                ),
                             )
                         )
                     # sent 表示已经交给 wx4py 的串行发送队列，不代表微信提供了送达回执。
                     self.history.mark_trigger_sent(job.trigger_id, stored.id)
+                    logger.info(
+                        "回复已入队发送：group=%s trigger_id=%s conversation=%s reply_groups=%s reply_chars=%s",
+                        group_name,
+                        job.trigger_id,
+                        job.snapshot.conversation_id,
+                        ",".join(job.reply_groups or self._reply_groups_for(group_name)),
+                        len(reply),
+                    )
             except Exception as exc:
                 self.history.mark_trigger_failed(job.trigger_id, str(exc))
                 logger.exception("生成群回复失败：group=%s trigger_id=%s", group_name, job.trigger_id)
@@ -545,20 +575,38 @@ class KJFWDHandler(MessageHandler):
         return append_reference_notice(text)
 
     def _should_trigger(self, group_name: str, mode: str, is_at_me: bool, request: str) -> bool:
+        logger.info(
+            "判断触发：group=%s mode=%s is_at=%s request=%s",
+            group_name,
+            mode,
+            is_at_me,
+            _log_excerpt(request),
+        )
         if is_at_me:
             if mode != "question_only":
+                logger.info("触发通过：group=%s reason=at_mention", group_name)
                 return True
             if self._is_command_request(request):
+                logger.info("触发通过：group=%s reason=command_or_help", group_name)
                 return True
-            return self.classifier.should_reply(group_name=group_name, content=request)
+            decision = self.classifier.should_reply(group_name=group_name, content=request)
+            logger.info("问题分类结果：group=%s should_reply=%s request=%s", group_name, decision, _log_excerpt(request))
+            return decision
         if mode == "mention_only":
+            logger.info("触发跳过：group=%s reason=mention_only_without_at", group_name)
             return False
         if mode == "all_messages":
-            return bool(str(request or "").strip())
+            decision = bool(str(request or "").strip())
+            logger.info("触发结果：group=%s mode=all_messages should_reply=%s", group_name, decision)
+            return decision
         if mode == "question_only":
             if self._is_command_request(request):
+                logger.info("触发通过：group=%s reason=command_or_help", group_name)
                 return True
-            return self.classifier.should_reply(group_name=group_name, content=request)
+            decision = self.classifier.should_reply(group_name=group_name, content=request)
+            logger.info("问题分类结果：group=%s should_reply=%s request=%s", group_name, decision, _log_excerpt(request))
+            return decision
+        logger.warning("未知监听模式，跳过触发：group=%s mode=%s", group_name, mode)
         return False
 
     @staticmethod
@@ -576,10 +624,13 @@ class KJFWDHandler(MessageHandler):
         return targets or (group_name,)
 
     @staticmethod
-    def _outbound_reply(source_group: str, target_group: str, reply: str) -> str:
+    def _outbound_reply(
+        source_group: str, target_group: str, reply: str, original_message: str = ""
+    ) -> str:
         if target_group == source_group:
             return reply
-        prefix = f"[来源群：{source_group}]"
+        original = _log_excerpt(original_message, limit=300) or "（空）"
+        prefix = f"[来源群：{source_group}]\n[原始消息：{original}]"
         if str(reply or "").startswith(prefix):
             return reply
         return prefix + "\n" + reply
@@ -615,3 +666,10 @@ def build_help_text(skill_entries: Sequence[Tuple[str, str]]) -> str:
         lines.extend(("", "可用技能指令："))
         lines.extend(f"/{name} <问题>：{title}。" for name, title in skill_entries)
     return "\n".join(lines)
+
+
+def _log_excerpt(value: str, *, limit: int = 120) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"

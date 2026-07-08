@@ -246,6 +246,7 @@ class HandlerTests(unittest.TestCase):
         self.assertTrue(self.action_ready.wait(2))
         self.assertEqual("机器人参考群", self.actions[0].group)
         self.assertIn("[来源群：客户群]", self.actions[0].content)
+        self.assertIn("[原始消息：电脑蓝屏]", self.actions[0].content)
         self.assertIn("请先断电，再检查电源线。", self.actions[0].content)
 
     def test_inline_at_in_raw_child_controls_triggers_reply(self):
