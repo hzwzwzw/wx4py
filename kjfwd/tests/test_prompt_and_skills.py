@@ -28,6 +28,18 @@ class PromptAndSkillTests(unittest.TestCase):
             self.assertIn("必须优先采用", rendered)
             self.assertIn("先备份数据", rendered)
 
+    def test_neko_skill_is_available_as_explicit_command(self):
+        skills_dir = Path(__file__).resolve().parents[1] / "skills"
+        registry = CapabilityRegistry.from_skill_directory(skills_dir)
+        self.assertIn("neko", registry.names)
+        self.assertIn(("neko", "猫娘语气"), registry.command_entries)
+
+        names = explicit_skill_names("/neko 显卡报错怎么办")
+        rendered = registry.render(names)
+        self.assertIn("skill name=\"neko\"", rendered)
+        self.assertIn("必须优先采用", rendered)
+        self.assertIn("轻微猫娘语气", rendered)
+
     def test_prompt_separates_untrusted_history_from_current_request(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
