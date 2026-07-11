@@ -91,6 +91,11 @@ class DebugConfig:
 
 
 @dataclass(frozen=True)
+class ReplyDebounceConfig:
+    delay_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
 class BotConfig:
     groups: Tuple[GroupConfig, ...]
     llm: LLMConfig
@@ -98,6 +103,7 @@ class BotConfig:
     history: HistoryConfig
     conversation_pool: ConversationPoolConfig
     debug: DebugConfig
+    reply_debounce: ReplyDebounceConfig
     system_prompt_path: Path
     skills_path: Path
     queue_size_per_group: int = 5
@@ -227,6 +233,13 @@ def load_config(
         router_decision_log=bool(debug_data.get("router_decision_log", True)),
     )
 
+    debounce_data = data.get("reply_debounce", {})
+    reply_debounce = ReplyDebounceConfig(
+        delay_seconds=float(debounce_data.get("delay_seconds", 0.0)),
+    )
+    if reply_debounce.delay_seconds < 0:
+        raise ValueError("reply_debounce.delay_seconds 不能小于 0")
+
     return BotConfig(
         groups=groups,
         llm=LLMConfig(
@@ -242,6 +255,7 @@ def load_config(
         history=history,
         conversation_pool=conversation_pool,
         debug=debug,
+        reply_debounce=reply_debounce,
         system_prompt_path=_resolve_path(base_dir, data.get("system_prompt_path", "prompts/system.md")),
         skills_path=_resolve_path(base_dir, data.get("skills_path", "skills")),
         queue_size_per_group=int(data.get("queue_size_per_group", 5)),

@@ -7,6 +7,7 @@ from pathlib import Path
 from wx4py import MessageEvent, ReplyAction
 
 from kjfwd.kjfwd_bot.capabilities import CapabilityRegistry
+from kjfwd.kjfwd_bot.config import ReplyDebounceConfig
 from kjfwd.kjfwd_bot.handler import (
     KJFWDHandler,
     append_reference_notice,
@@ -248,6 +249,81 @@ class HandlerTests(unittest.TestCase):
         self.assertIn("[来源群：客户群]", self.actions[0].content)
         self.assertIn("[原始消息：电脑蓝屏]", self.actions[0].content)
         self.assertIn("请先断电，再检查电源线。", self.actions[0].content)
+
+    def test_reply_debounce_replaces_pending_job_in_same_conversation(self):
+        self.handler.reply_debounce = ReplyDebounceConfig(delay_seconds=0.2)
+        now = time.time()
+        self.handler.handle(
+            MessageEvent(
+                "客户群",
+                "@柯基服务队\u2005 打印机脱机",
+                now,
+                "柯基服务队",
+                True,
+                FakeRaw((34, 1)),
+            )
+        )
+        time.sleep(0.05)
+        self.assertEqual([], self.model.calls)
+        conversations = self.store.list_active_conversations("客户群", now=now + 0.1)
+        self.assertEqual(1, len(conversations))
+        conversation_id = conversations[0].id
+
+        self.handler.router = FakeRouter(
+            [ConversationRoute("use_existing", conversation_id=conversation_id)]
+        )
+        self.handler.handle(
+            MessageEvent(
+                "客户群",
+                "@柯基服务队\u2005 还是打印不了",
+                now + 0.1,
+                "柯基服务队",
+                True,
+                FakeRaw((34, 2)),
+            )
+        )
+        deadline = time.time() + 2
+        while len(self.actions) < 1 and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertEqual(1, len(self.model.calls))
+        self.assertIn("<current_request>\n还是打印不了", self.model.calls[0][1])
+        self.assertEqual("superseded", self.store.get_trigger(1)["error"])
+        self.assertEqual("sent", self.store.get_trigger(2)["status"])
+
+    def test_reply_debounce_keeps_independent_conversation_timers(self):
+        self.handler.reply_debounce = ReplyDebounceConfig(delay_seconds=0.15)
+        now = time.time()
+        self.handler.handle(
+            MessageEvent(
+                "客户群",
+                "@柯基服务队\u2005 打印机脱机",
+                now,
+                "柯基服务队",
+                True,
+                FakeRaw((35, 1)),
+            )
+        )
+        self.handler.handle(
+            MessageEvent(
+                "客户群",
+                "@柯基服务队\u2005 硬盘报错",
+                now + 0.1,
+                "柯基服务队",
+                True,
+                FakeRaw((35, 2)),
+            )
+        )
+        deadline = time.time() + 2
+        while len(self.actions) < 2 and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertEqual(2, len(self.model.calls))
+        prompts = "\n".join(call[1] for call in self.model.calls)
+        self.assertIn("<current_request>\n打印机脱机", prompts)
+        self.assertIn("<current_request>\n硬盘报错", prompts)
+        self.assertEqual("sent", self.store.get_trigger(1)["status"])
+        self.assertEqual("sent", self.store.get_trigger(2)["status"])
 
     def test_inline_at_in_raw_child_controls_triggers_reply(self):
         raw = FakeControl(

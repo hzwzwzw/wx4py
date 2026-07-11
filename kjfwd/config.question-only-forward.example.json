@@ -66,6 +66,9 @@
     "conversation_id_in_reply": true,
     "router_decision_log": true
   },
+  "reply_debounce": {
+    "delay_seconds": 0
+  },
   "system_prompt_path": "prompts/system.md",
   "skills_path": "skills",
   "queue_size_per_group": 5

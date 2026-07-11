@@ -29,6 +29,8 @@ BRAVE_KEY=...
 
 四个答疑群使用 `question_only` 并统一转发到一个机器人参考群的模板见 `config.question-only-forward.example.json`。
 
+可选配置 `reply_debounce.delay_seconds` 用于延迟回复，默认 `0` 表示关闭。开启后，同一来源群、同一 conversation 内如果在等待期间出现新的需回复消息，旧消息的计时会被取消，只回复最新消息；不同 conversation 会各自独立计时。
+
 
 ## Skills
 

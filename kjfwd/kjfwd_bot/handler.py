@@ -17,7 +17,7 @@ from .history import HistoryStore
 from .llm import ChatModel
 from .models import ConversationRoute, ReplyJob
 from .prompt import PromptBuilder, explicit_skill_names, strip_at
-from .config import ConversationPoolConfig
+from .config import ConversationPoolConfig, ReplyDebounceConfig
 from .classifier import KeywordQuestionClassifier, MessageClassifier
 from .router import AlwaysNewRouter, Router, is_low_information_followup, title_from_request
 
@@ -156,6 +156,7 @@ class KJFWDHandler(MessageHandler):
         trigger_dedupe_seconds: float = 1.0,
         queue_size_per_group: int = 5,
         conversation_pool: ConversationPoolConfig = ConversationPoolConfig(),
+        reply_debounce: ReplyDebounceConfig = ReplyDebounceConfig(),
         show_conversation_id: bool = True,
     ):
         self.groups = groups
@@ -175,8 +176,10 @@ class KJFWDHandler(MessageHandler):
         self.max_characters = max_characters
         self.trigger_dedupe_seconds = trigger_dedupe_seconds
         self.conversation_pool = conversation_pool
+        self.reply_debounce = reply_debounce
         self.show_conversation_id = show_conversation_id
         self._queues = {name: queue.Queue(maxsize=queue_size_per_group) for name in groups}
+        self._pending_reply_timers: Dict[Tuple[str, str], Tuple[threading.Timer, ReplyJob]] = {}
         self._threads: Dict[str, threading.Thread] = {}
         self._emit_action: Optional[Callable] = None
         self._stop_event = threading.Event()
@@ -289,7 +292,7 @@ class KJFWDHandler(MessageHandler):
             self._reply_groups_for(event.group),
             request,
         )
-        self._enqueue_job(event.group, job)
+        self._schedule_job(event.group, job)
         return None
 
     def _handle_reset(
@@ -362,7 +365,7 @@ class KJFWDHandler(MessageHandler):
                 reply_groups,
                 request,
             )
-        self._enqueue_job(group_name, job)
+        self._schedule_job(group_name, job)
         return None
 
     def _route_message(self, group_name: str, message, request: str, timestamp: float):
@@ -492,6 +495,52 @@ class KJFWDHandler(MessageHandler):
         except queue.Full:
             self.history.mark_trigger_failed(job.trigger_id, "queue_full")
             logger.warning("群回复队列已满，丢弃触发消息：%s", group_name)
+
+    def _schedule_job(self, group_name: str, job: ReplyJob) -> None:
+        delay = float(self.reply_debounce.delay_seconds)
+        if delay <= 0:
+            self._enqueue_job(group_name, job)
+            return
+        key = (group_name, job.snapshot.conversation_id or f"trigger:{job.trigger_id}")
+        with self._context_lock:
+            previous = self._pending_reply_timers.get(key)
+            if previous:
+                timer, old_job = previous
+                timer.cancel()
+                self.history.mark_trigger_failed(old_job.trigger_id, "superseded")
+                logger.info(
+                    "延迟回复被新消息替换：group=%s conversation=%s old_trigger=%s new_trigger=%s",
+                    group_name,
+                    key[1],
+                    old_job.trigger_id,
+                    job.trigger_id,
+                )
+            timer = threading.Timer(delay, self._enqueue_debounced_job, args=(key, job))
+            timer.daemon = True
+            self._pending_reply_timers[key] = (timer, job)
+            timer.start()
+            logger.info(
+                "延迟回复计时开始：group=%s conversation=%s trigger_id=%s delay_seconds=%s",
+                group_name,
+                key[1],
+                job.trigger_id,
+                delay,
+            )
+
+    def _enqueue_debounced_job(self, key: Tuple[str, str], job: ReplyJob) -> None:
+        group_name, conversation_key = key
+        with self._context_lock:
+            current = self._pending_reply_timers.get(key)
+            if not current or current[1].trigger_id != job.trigger_id:
+                return
+            self._pending_reply_timers.pop(key, None)
+        logger.info(
+            "延迟回复计时结束，入队生成：group=%s conversation=%s trigger_id=%s",
+            group_name,
+            conversation_key,
+            job.trigger_id,
+        )
+        self._enqueue_job(group_name, job)
 
     def _worker(self, group_name: str) -> None:
         jobs = self._queues[group_name]
@@ -637,6 +686,12 @@ class KJFWDHandler(MessageHandler):
 
     def stop(self) -> None:
         self._stop_event.set()
+        with self._context_lock:
+            pending = list(self._pending_reply_timers.values())
+            self._pending_reply_timers.clear()
+        for timer, job in pending:
+            timer.cancel()
+            self.history.mark_trigger_failed(job.trigger_id, "stopped")
         for jobs in self._queues.values():
             jobs.put(None)
         for thread in self._threads.values():

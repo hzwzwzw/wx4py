@@ -60,6 +60,7 @@ def build_handler(config: BotConfig, history: HistoryStore) -> KJFWDHandler:
         trigger_dedupe_seconds=config.history.trigger_dedupe_seconds,
         queue_size_per_group=config.queue_size_per_group,
         conversation_pool=config.conversation_pool,
+        reply_debounce=config.reply_debounce,
         show_conversation_id=config.debug.conversation_id_in_reply,
     )
 
