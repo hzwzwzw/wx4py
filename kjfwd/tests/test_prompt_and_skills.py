@@ -15,6 +15,9 @@ class PromptAndSkillTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("C楼三层南侧吧台", prompt)
         self.assertIn("台式机问题，可以指引用户申请外勤服务", prompt)
+        self.assertIn("线上微信群中可能同时有前来咨询的客户和正在协助的真人科服队员", prompt)
+        self.assertIn("不要把队员的追问、指导、诊断建议或风险提醒当作客户提供的故障现象", prompt)
+        self.assertIn("不要抢答或覆盖队员判断", prompt)
 
     def test_skill_directory_is_extensible_and_explicit_command_is_detected(self):
         with tempfile.TemporaryDirectory() as directory:
